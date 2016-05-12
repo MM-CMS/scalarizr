@@ -5,7 +5,8 @@ Created on Nov 25, 2011
 '''
 
 from scalarizr import rpc, storage2
-from scalarizr.api import operation
+from scalarizr import bollard
+from scalarizr.node import __node__
 from scalarizr.util import Singleton
 
 
@@ -32,8 +33,10 @@ class StorageAPI(object):
             'invalid': "'%s' is invalid, '%s' expected"
     }
 
-    def __init__(self):
-        self._op_api = operation.OperationAPI()
+    def do_create(self, volume, mkfs, mount, fstab):
+        vol = storage2.volume(volume)
+        vol.ensure(mkfs=mkfs, mount=mount, fstab=fstab)
+        return dict(vol)
 
     @rpc.command_method
     def create(self, volume=None, mkfs=False, mount=False, fstab=False, async=False):
@@ -64,12 +67,21 @@ class StorageAPI(object):
         """
         self._check_invalid(volume, 'volume', dict)
 
-        def do_create(op):
-            vol = storage2.volume(volume)
-            vol.ensure(mkfs=mkfs, mount=mount, fstab=fstab)
-            return dict(vol)
-        return self._op_api.run('storage.create', do_create, async=async)
+        async_result = __node__['bollard'].apply_async('api.storage.create',
+                                                       args=(volume, mkfs, mount, fstab),
+                                                       soft_timeout=(10) * 60,
+                                                       hard_timeout=(10 + 1) * 60)
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
+
+    def do_snapshot(self, volume, description, tags):
+        vol = storage2.volume(volume)
+        vol.ensure()
+        snap = vol.snapshot(description=description, tags=tags)
+        return dict(snap)
 
     @rpc.command_method
     def snapshot(self, volume=None, description=None, tags=None, async=False):
@@ -97,14 +109,20 @@ class StorageAPI(object):
         if tags:
             self._check_invalid(tags, 'tags', dict)
 
-        def do_snapshot(op):
-            vol = storage2.volume(volume)
-            vol.ensure()
-            snap = vol.snapshot(description=description, tags=tags)
-            return dict(snap)
+        async_result = __node__['bollard'].apply_async('api.storage.snapshot',
+                                                       args=(volume,),
+                                                       soft_timeout=(1 * 24) * 3600,
+                                                       hard_timeout=(1 * 24 + 1) * 3600)
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-        return self._op_api.run('storage.snapshot', do_snapshot, async=async)
-
+    def do_detach(self, volume, force, **kwds):
+        vol = storage2.volume(volume)
+        vol.ensure()
+        vol.detach(force=force, **kwds)
+        return dict(vol)
 
     @rpc.command_method
     def detach(self, volume=None, force=False, async=False, **kwds):
@@ -126,14 +144,20 @@ class StorageAPI(object):
         self._check_invalid(volume, 'volume', dict)
         self._check_empty(volume.get('id'), 'volume.id')
 
-        def do_detach(op):
-            vol = storage2.volume(volume)
-            vol.ensure()
-            vol.detach(force=force, **kwds)
-            return dict(vol)
+        async_result = __node__['bollard'].apply_async('api.storage.detach',
+                                                       args=(volume, force), kwds=kwds,
+                                                       soft_timeout=(1 * 10) * 60,
+                                                       hard_timeout=(1 * 10 + 1) * 60)
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-        return self._op_api.run('storage.detach', do_detach, async=async)
-
+    def do_destroy(self, volume, force, **kwds):
+        vol = storage2.volume(volume)
+        vol.ensure()
+        vol.detach(force=force, **kwds)
+        return dict(vol)
 
     @rpc.command_method
     def destroy(self, volume, force=False, async=False, **kwds):
@@ -155,14 +179,19 @@ class StorageAPI(object):
         self._check_invalid(volume, 'volume', dict)
         self._check_empty(volume.get('id'), 'volume.id')
 
-        def do_destroy(op):
-            vol = storage2.volume(volume)
-            vol.ensure()
-            vol.detach(force=force, **kwds)
-            return dict(vol)
+        async_result = __node__['bollard'].apply_async('api.storage.destroy',
+                                                       args=(volume, force), kwds=kwds,
+                                                       soft_timeout=(1 * 10) * 60,
+                                                       hard_timeout=(1 * 10 + 1) * 60)
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-        return self._op_api.run('storage.destroy', do_destroy, async=async)
-
+    def do_grow(self, volume, growth):
+        vol = storage2.volume(volume)
+        growed_vol = vol.grow(**growth)
+        return dict(growed_vol)
 
     @rpc.command_method
     def grow(self, volume, growth, async=False):
@@ -204,13 +233,19 @@ class StorageAPI(object):
         self._check_invalid(volume, 'volume', dict)
         self._check_empty(volume.get('id'), 'volume.id')
 
-        def do_grow(op):
-            vol = storage2.volume(volume)
-            growed_vol = vol.grow(**growth)
-            return dict(growed_vol)
+        async_result = __node__['bollard'].apply_async('api.storage.grow',
+                                                       args=(volume, growth),
+                                                       soft_timeout=(1 * 24) * 3600,
+                                                       hard_timeout=(1 * 24 + 1) * 3600)
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-        return self._op_api.run('storage.grow', do_grow, async=async)
-
+    def do_replace_raid_disk(self, volume, index, disk):
+        vol = storage2.volume(volume)
+        vol.replace_disk(index, disk)
+        return dict(vol)
 
     @rpc.command_method
     def replace_raid_disk(self, volume, index, disk, async=False):
@@ -234,16 +269,47 @@ class StorageAPI(object):
         self._check_invalid(volume, 'index', int)
         self._check_empty(volume.get('id'), 'volume.id')
 
-        def do_replace_raid_disk(op):
-            vol = storage2.volume(volume)
-            vol.replace_disk(index, disk)
-            return dict(vol)
-
-        return self._op_api.run('storage.replace-raid-disk', do_replace_raid_disk, async=async)
-
+        async_result = __node__['bollard'].apply_async('api.storage.replace-raid-disk',
+                                                       args=(volume, index, disk),
+                                                       soft_timeout=(1 * 24) * 3600,
+                                                       hard_timeout=(1 * 24 + 1) * 3600)
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
     def _check_invalid(self, param, name, type_):
         assert isinstance(param, type_), self.error_messages['invalid'] % (name, type_)
 
     def _check_empty(self, param, name):
         assert param, self.error_messages['empty'] % name
+
+
+@bollard.task(name='api.storage.create')
+def create(*args, **kwds):
+    return StorageAPI().do_create(*args, **kwds)
+
+
+@bollard.task(name='api.storage.snapshot')
+def snapsho(*args, **kwds):
+    return StorageAPI().do_snapshot(*args, **kwds)
+
+
+@bollard.task(name='api.storage.detach')
+def detach(*args, **kwds):
+    return StorageAPI().do_detach(*args, **kwds)
+
+
+@bollard.task(name='api.storage.destroy')
+def destroy(*args, **kwds):
+    return StorageAPI().do_destroy(*args, **kwds)
+
+
+@bollard.task(name='api.storage.grow')
+def grow(*args, **kwds):
+    return StorageAPI().do_grow(*args, **kwds)
+
+
+@bollard.task(name='api.storage.replace_raid_disk')
+def replace_raid_disk(*args, **kwds):
+    return StorageAPI().do_replace_raid_disk(*args, **kwds)

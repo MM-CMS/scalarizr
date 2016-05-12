@@ -747,31 +747,6 @@ class MysqlInitScript(initdv2.ParametrizedInitScript):
         return initdv2.Status.RUNNING if self.mysql_cli.test_connection() else initdv2.Status.NOT_RUNNING
 
 
-    def _get_mysql_logerror_path(self):
-        cmd = 'my_print_defaults mysqld | grep log_error'
-        out = system2(cmd, shell=True, raise_exc=False)[0]
-        return out.split('=')[1] if out else '/var/log/mysql/error.log'
-
-
-    def _get_mysql_error(self):
-        error = ''
-        cmd = "cat %s | tail -256" % self._get_mysql_logerror_path()
-        content = reversed(system2(cmd, shell=True, raise_exc=False)[0].split('\n'))
-        start = re.compile("^.*[ ]Fatal error:[ ].*$")
-        end = re.compile(r'^[0-9]{6}[ ][0-9]{2}:[0-9]{2}:[0-9]{2}[ ]\[?ERROR\]?[ ]Aborting$')
-        for line in content:
-            if end.match(line):
-                error = '%s\n' % line + error
-                while not start.match(line):
-                    try:
-                        line = content.next()
-                    except StopIteration:
-                        break
-                    error = '%s\n' % line + error
-                break
-        return error
-
-
     def start(self):
         '''
         Commented, cause Dima said this code is useless
@@ -796,11 +771,7 @@ class MysqlInitScript(initdv2.ParametrizedInitScript):
                 if self._is_sgt_process_exists():
                     LOG.warning('MySQL service is running with skip-grant-tables mode.')
                 elif not self.running:
-                    error = self._get_mysql_error()
-                    if error:
-                        raise Exception('%s' % error)
-                    else:
-                        raise
+                    raise Exception('Failed to start MySQL service')
 
 
     def stop(self, reason=None):

@@ -335,14 +335,11 @@ class AptPackageMgr(PackageMgr):
     def restore_backup(self, name, backup_id):
         def dpkg_configure(raise_exc=False):
             cmd = ('dpkg', '--configure', '-a')
-            return linux.system(cmd, raise_exc=raise_exc)     
+            return linux.system(cmd, raise_exc=raise_exc)
 
-        error_re = re.compile(r'dpkg: error processing ([^\s]+)')
-        problem_packages = []
-        for line in dpkg_configure()[1].splitlines():
-            m = error_re.match(line)
-            if m:
-                problem_packages.append(m.group(1))
+        packages = linux.system(("dpkg-query", "-W", "-f=${Status}|${Package}\n"))[0].strip().split('\n')
+        problem_packages = (package.split('|')[1] for package in packages
+                            if package.split('|')[0] in ('install ok unpacked', 'install ok half-configured'))
 
         # delete postinst scripts of problem packages
         for name in problem_packages:
@@ -570,7 +567,8 @@ class YumPackageMgr(PackageMgr):
             installed = None
 
         if 'Available Packages' in lines:
-            versions = [version_re.match(line).group(1) for line in lines[lines.index('Available Packages')+1:]]
+            versions = [version_re.match(line).group(1) for line in lines[lines.index('Available Packages')+1:]
+                        if version_re.match(line)]
         else:
             versions = [None]
 
@@ -586,7 +584,9 @@ class YumPackageMgr(PackageMgr):
 
 
     def _install_file(self, *files):
-        linux.system(['/usr/bin/rpm', '-i', '--force', '--nodeps'] + list(files))
+        out, err, _ = linux.system(['/usr/bin/rpm', '-U', '--force', '--nodeps'] + list(files))
+        if 'scriptlet failed' in err:
+            raise Exception(err)
 
 
     def _install_download_only(self, name_version, download_dir, version=None, **kwds):
@@ -685,127 +685,10 @@ class RpmPackageMgr(PackageMgr):
         pass
 
 
-if linux.os.windows_family:
-    import posixpath
-
-
-    class WinPackageMgr(object):
-        SOURCES_DIR = os.path.join(util.reg_value('InstallDir'), 'etc')
-
-
-        def __init__(self):
-            self.index = None
-   
-
-        def install(self, name, version=None, updatedb=False, **kwds):
-            ''' Installs a `version` of package `name` '''
-            if not self.index or updatedb:
-                self.updatedb()
-            packageurl = self.index[name]  # simplification. candidate is always the one.
-
-            tmp_dir = tempfile.mkdtemp()
-            try:
-                packagefile = os.path.join(tmp_dir, os.path.basename(packageurl))
-                LOG.info('Downloading %s', packageurl)
-                urlretrieve(packageurl, packagefile)
-
-                LOG.info('Executing installer')
-                p = subprocess.Popen('start "Installer" /wait "%s" /S' % packagefile, shell=True)
-                out, err = p.communicate()
-                LOG.debug('out: %s', out)
-                LOG.debug('err: %s', err)
-                if p.returncode:
-                    msg = 'Installation failed. <out>: %s, <err>: %s' % (out, err)
-                    raise Exception(msg)
-                LOG.info('Done')
-            finally:
-                shutil.rmtree(tmp_dir)
-    
-
-        def installed_version(self, name):
-            ''' Return installed package version '''
-            return '{0}-{1}'.format(util.reg_value('DisplayVersion'), util.reg_value('DisplayRelease'))
-
-        
-        def _join_packages_str(self, sep, name, version, *args):
-            packages = [(name, version)]
-            if args:
-                for i in xrange(0, len(args), 2):
-                    packages.append(args[i:i+2])
-            format = '%s' + sep +'%s'
-            return ' '.join(format % p for p in packages)       
-        
-
-        def updatedb(self, **kwds):
-            tmp_dir = tempfile.mkdtemp()
-
-            self.index = {}
-            try:        
-                LOG.debug('Scan package sources dir')
-                for sourcesfile in glob.glob(os.path.join(self.SOURCES_DIR, '*.winrepo')):
-                    LOG.debug('Process sources file %s', sourcesfile)
-                    urls = open(sourcesfile).read().splitlines()
-                    urls = map(string.strip, urls)
-                    urls = filter(lambda u: u and not u.startswith('#'), urls)
-                    for url in urls:
-                        if not re.search(r'{0}/?'.format(linux.os['arch']), url):
-                            url = posixpath.join(url, linux.os['arch'])
-                        dst = os.path.join(tmp_dir, url.replace('/', '_'))
-                        src = posixpath.join(url, 'index')
-                        LOG.debug('Fetching index file %s', src)
-                        urlretrieve(src, dst)
-
-                        with open(dst) as fp:
-                            for line in fp:
-                                colums = map(string.strip, line.split(' '))
-                                colums = filter(None, colums)
-                                package = colums[0]
-                                packagefile = colums[1]
-                                self.index[package] = posixpath.join(url, packagefile)
-            finally:
-                shutil.rmtree(tmp_dir)
-
-
-        def info(self, name):
-            if not self.index:
-                self.updatedb()
-
-            try:
-                installed = self.installed_version(name)
-            except:
-                installed = None
-            try:
-                candidate = os.path.basename(self.index[name])
-                candidate = candidate.split('_', 1)[1].rsplit('.', 2)[0]
-            except KeyError:
-                candidate = None
-            if installed and installed == candidate:
-                candidate = None
-
-            LOG.debug('Package %s info. installed: %s, candidate: %s', name, installed, candidate)
-            return {
-                'installed': installed,
-                'candidate': candidate
-            }
-
-
-        def version_cmp(self, name_1, name_2):
-            return cmp(distutils.version.LooseVersion(name_1), 
-                distutils.version.LooseVersion(name_2))
-
-
-        def list(self):
-            return []
-
-
-    class WinRepository(Repository):
-        filename_tpl = os.path.join(WinPackageMgr.SOURCES_DIR, '{name}.winrepo')
-        config_tpl = '{url}'
-
 
 def package_mgr():
     if linux.os['family'] == 'Windows':
-        return WinPackageMgr()
+        raise NotImplementedError('Package management not implemented on Windows')
     elif linux.os['family'] in ('RedHat', 'Oracle'):
         return YumPackageMgr()
     return AptPackageMgr()
@@ -814,7 +697,7 @@ def package_mgr():
 def repository(*args, **kwds):
     cls = None
     if linux.os['family'] == 'Windows':
-        cls = WinRepository
+        raise NotImplementedError('Package management not implemented on Windows')
     elif linux.os['family'] in ('RedHat', 'Oracle'):
         cls = YumRepository
     else:
@@ -822,7 +705,6 @@ def repository(*args, **kwds):
     return cls(*args, **kwds)
 
 
-EPEL_RPM_URL = 'http://download.fedoraproject.org/pub/epel/6/i386/epel-release-6-7.noarch.rpm'
 def epel_repository():
     '''
     Ensure EPEL repository for RHEL based servers.
@@ -832,9 +714,16 @@ def epel_repository():
         return
 
     mgr = RpmPackageMgr()
-    installed = mgr.info(EPEL_RPM_URL)['installed']
+    if linux.os['release'] >= (7, 0):
+        url = 'http://dl.fedoraproject.org/pub/epel/7/x86_64/e/epel-release-7-6.noarch.rpm'
+    elif linux.os['release'] >= (6, 0):
+        url = 'http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm'
+    else:
+        url = 'http://dl.fedoraproject.org/pub/epel/5/x86_64/epel-release-5-4.noarch.rpm'
+
+    installed = mgr.info(url)['installed']
     if not installed:
-        mgr.install(EPEL_RPM_URL)
+        mgr.install(url)
 
 
 def apt_source(name, sources, gpg_keyserver=None, gpg_keyid=None):

@@ -9,8 +9,11 @@ from __future__ import with_statement
 import os
 import time
 import logging
+
 from scalarizr import config
+from scalarizr import bollard
 from scalarizr.bus import bus
+from scalarizr.node import __node__
 from scalarizr import rpc, storage2
 from scalarizr import linux
 from scalarizr.linux import iptables
@@ -22,7 +25,7 @@ from scalarizr.services import backup
 from scalarizr.handlers import transfer_result_to_backup_result, DbMsrMessages
 from scalarizr.services.redis import __redis__
 from scalarizr.util.cryptotool import pwgen
-from scalarizr.storage2.cloudfs import LargeTransfer
+from scalarizr.storage2 import largetransfer
 from scalarizr import node
 from scalarizr.util import Singleton
 from scalarizr.linux import pkgmgr
@@ -35,6 +38,44 @@ STORAGE_PATH = '/mnt/redisstorage'
 
 
 LOG = logging.getLogger(__name__)
+
+
+def create_databundle_callback(task, meta):
+    if task['state'] == 'completed':
+        snap = task.result
+        bus.fire('%s_data_bundle' % BEHAVIOUR, snapshot_id=snap['id'])
+        used_size = int(system2(('df', '-P', '--block-size=M',
+            STORAGE_PATH))[0].split('\n')[1].split()[2][:-1])
+        msg_data = {
+            'db_type': BEHAVIOUR,
+            'status': 'ok',
+            'used_size': '%.3f' % (float(used_size) / 1000,),
+            BEHAVIOUR: {'snapshot_config': dict(snap)},
+        }
+        node.__node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT, msg_data)
+    else:
+        node.__node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT,
+            dict(db_type=BEHAVIOUR,
+                status='error',
+                last_error=str(task.exception)))
+
+
+def create_backup_callback(task, meta):
+    if task['state'] == 'completed':
+        __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT,
+            dict(db_type=BEHAVIOUR,
+                status='ok',
+                backup_parts=task.result))
+    else:
+        __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT,
+            dict(db_type=BEHAVIOUR,
+                status='error',
+                last_error=str(task.exception)))
+
+
+def grow_volume_callback(task, meta):
+    if task['state'] == 'completed':
+        __redis__['volume'] = task.result
 
 
 class RedisAPI(BehaviorAPI):
@@ -53,12 +94,15 @@ class RedisAPI(BehaviorAPI):
     _queryenv = None
 
     def __init__(self):
-        self._cnf = bus.cnf
         self._op_api = operation.OperationAPI()
         self._queryenv = bus.queryenv_service
-        ini = self._cnf.rawini
-        self._role_name = ini.get(config.SECT_GENERAL, config.OPT_ROLE_NAME)
         self.redis_instances = redis_service.RedisInstances()
+
+    @property
+    def _role_name(self):
+        self._cnf = bus.cnf
+        ini = self._cnf.rawini
+        return ini.get(config.SECT_GENERAL, config.OPT_ROLE_NAME)
 
     def _reinit_instances(self):
         proc = self.get_all_processes()
@@ -193,7 +237,7 @@ class RedisAPI(BehaviorAPI):
         new_ports = []
 
         for port, password in zip(ports, passwords or [None for port in ports]):
-            log.info('Launch Redis %s on port %s', 
+            log.info('Launch Redis %s on port %s',
                 'Master' if __redis__["replication_master"] else 'Slave', port)
 
             if iptables.enabled():
@@ -278,7 +322,7 @@ class RedisAPI(BehaviorAPI):
 
     def _get_redis_ports(self):
         conf_paths = os.listdir(os.path.dirname(__redis__['defaults']['redis.conf']))
-        ports = [conf.split('.')[1] for conf in conf_paths]
+        ports = [conf.split('.')[1] for conf in conf_paths if conf.startswith("redis") and conf.endswith(".conf")]
         return filter(lambda x: x.isdigit(), ports)
 
     def get_running_processes(self):
@@ -362,53 +406,56 @@ class RedisAPI(BehaviorAPI):
 
         return {'slaves': slaves}
 
+    def do_databundle(self, volume):
+        LOG.info("Creating Redis data bundle")
+        backup_obj = backup.backup(type='snap_redis',
+                                   volume=volume,
+                                   tags=volume['tags'])
+
+        restore = backup_obj.run()
+        snap = restore.snapshot
+
+        return dict(snap)
+
     @rpc.command_method
     def create_databundle(self, async=True):
         """
         Creates a new data bundle of /mnt/redis-storage.
         """
 
-        def do_databundle(op):
-            try:
-                bus.fire('before_%s_data_bundle' % BEHAVIOUR)
-                # Creating snapshot
-                LOG.info("Creating Redis data bundle")
-                backup_obj = backup.backup(type='snap_redis',
-                                           volume=__redis__['volume'],
-                                           tags=__redis__['volume'].tags)  # TODO: generate the same way as in
-                                                                           # mysql api or use __node__
-                restore = backup_obj.run()
-                snap = restore.snapshot
+        bus.fire('before_%s_data_bundle' % BEHAVIOUR)
 
-                used_size = int(system2(('df', '-P', '--block-size=M', STORAGE_PATH))[0].split('\n')[1].split()[2][:-1])
-                bus.fire('%s_data_bundle' % BEHAVIOUR, snapshot_id=snap.id)
+        async_result = __node__['bollard'].apply_async('api.redis.create-databundle',
+            args=(dict(__redis__.volume),),
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': create_databundle_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-                # Notify scalr
-                msg_data = dict(
-                    db_type=BEHAVIOUR,
-                    used_size='%.3f' % (float(used_size) / 1000,),
-                    status='ok'
-                )
-                msg_data[BEHAVIOUR] = {'snapshot_config': dict(snap)}
+    def do_backup(self):
+        self.redis_instances.save_all()
+        dbs = [r.db_path for r in self.redis_instances if r.db_path]
 
-                node.__node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT, msg_data)
+        cloud_storage_path = __node__.platform.scalrfs.backups(BEHAVIOUR)
+        LOG.info("Uploading backup to cloud storage (%s)", cloud_storage_path)
 
-                return restore
+        def progress_cb(progress):
+            LOG.debug('Uploading %s bytes' % progress)
 
-            except (Exception, BaseException), e:
-                LOG.exception(e)
+        uploader = largetransfer.Upload(dbs, cloud_storage_path,
+                                        progress_cb=progress_cb)
+        try:
+            uploader.apply_async()
+            uploader.join()
+            manifest = uploader.manifest
 
-                # Notify Scalr about error
-                node.__node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT, dict(
-                    db_type=BEHAVIOUR,
-                    status='error',
-                    last_error=str(e)))
-
-        return self._op_api.run('redis.create-databundle', 
-                                func=do_databundle,
-                                func_kwds={},
-                                async=async,
-                                exclusive=True)  #?
+            return transfer_result_to_backup_result(manifest)
+        except:
+            uploader.terminate()
+            raise
 
     @rpc.command_method
     def create_backup(self, async=True):
@@ -416,38 +463,15 @@ class RedisAPI(BehaviorAPI):
         Creates a new backup of db files of all currently running redis processes
         and uploads gzipped data to the cloud storage.
         """
-        def do_backup(op):
-            try:
-                self.redis_instances.save_all()
-                dbs = [r.db_path for r in self.redis_instances if r.db_path]
 
-                cloud_storage_path = bus.platform.scalrfs.backups(BEHAVIOUR)  #? __node__.platform
-                LOG.info("Uploading backup to cloud storage (%s)", cloud_storage_path)
-                transfer = LargeTransfer(dbs, cloud_storage_path)
-                result = transfer.run()
-                result = transfer_result_to_backup_result(result)
-
-                node.__node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT, dict(
-                    db_type=BEHAVIOUR,
-                    status='ok',
-                    backup_parts=result))
-
-                return result  #?
-
-            except (Exception, BaseException), e:
-                LOG.exception(e)
-
-                # Notify Scalr about error
-                node.__node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT, dict(
-                    db_type=BEHAVIOUR,
-                    status='error',
-                    last_error=str(e)))
-
-        return self._op_api.run('redis.create-backup', 
-                                func=do_backup,
-                                func_kwds={},
-                                async=async,
-                                exclusive=True)  #?
+        async_result = __node__['bollard'].apply_async('api.redis.create-backup',
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': create_backup_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
     @classmethod
     def do_check_software(cls, system_packages=None):
@@ -456,26 +480,45 @@ class RedisAPI(BehaviorAPI):
         requirements = None
         if os_name == 'ubuntu':
             if os_vers >= '14':
-                requirements = ['redis-server>=2.6,<2.9']
+                requirements = ['redis-server>=2.6,<3.1']
             elif os_vers >= '12':
-                requirements = ['redis-server>=2.2,<2.9']
+                requirements = ['redis-server>=2.2,<3.1']
             elif os_vers >= '10':
                 requirements = ['redis-server>=2.2,<2.3']
         elif os_name == 'debian':
-            if os_vers >= '7':
+            if os_vers >= '8':
+                requirements = ['redis-server>=2.6,<3.1']
+            elif os_vers >= '7':
                 requirements = ['redis-server>=2.6,<2.9']
             elif os_vers >= '6':
                 requirements = ['redis-server>=2.6,<2.7']
-        elif linux.os.oracle_family or os_name == 'redhat' or os_name == 'centos':
-            requirements = ['redis>=2.4,<2.9']
         elif os_name == 'amazon':
             if os_vers >= '2014':
-                requirements = ['redis>=2.8,<2.9']
+                requirements = ['redis>=2.8,<3.1']
+        elif linux.os.oracle_family or linux.os.redhat_family:
+            if os_vers > '5':
+                requirements = ['redis>=2.4,<3.1']
+            else:
+                requirements = ['redis>=2.4,<2.9']
+
         if requirements is None:
             raise exceptions.UnsupportedBehavior(
                     cls.behavior,
                     "Not supported on {0} os family".format(linux.os['family']))
         return pkgmgr.check_software(requirements, system_packages)[0]
+
+    def do_grow(self, volume, growth):
+        vol = storage2.volume(volume)
+        ports = self.busy_ports
+        LOG.debug("Stopping Redis processes on ports %s before growing data volume." % str(ports))
+        self.stop_service(ports=ports, reason='Growing data volume')
+        LOG.debug("All redis processes stopped. Attempting to grow data volume.")
+        try:
+            growed_vol = vol.grow(**growth)
+            return dict(growed_vol)
+        finally:
+            self.start_service(ports)
+            LOG.info("Grow process: Redis service has been started on ports %s." % str(ports))
 
     @rpc.command_method
     def grow_volume(self, volume, growth, async=False):
@@ -520,19 +563,27 @@ class RedisAPI(BehaviorAPI):
 
         LOG.info("Attempting to grow volume '%s'. New size: %s" % (volume.get('id'), growth))
 
-        def do_grow(op):
-            vol = storage2.volume(volume)
-            ports = self.busy_ports
-            LOG.debug("Stopping Redis processes on ports %s before growing data volume." % str(ports))
-            self.stop_service(ports=ports, reason='Growing data volume')
-            LOG.debug("All redis processes stopped. Attempting to grow data volume.")
-            try:
-                growed_vol = vol.grow(**growth)
-                redis_service.__redis__['volume'] = dict(growed_vol)
-                return dict(growed_vol)
-            finally:
-                self.start_service(ports)
-                LOG.info("Grow process: Redis service has been started on ports %s." % str(ports))
+        async_result = __node__['bollard'].apply_async('api.redis.grow-volume',
+            args=(volume, growth),
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': grow_volume_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-        return self._op_api.run('redis.grow-volume', do_grow, exclusive=True, async=async)
 
+@bollard.task(name='api.redis.grow-volume', exclusive=True)
+def grow_volume(*args, **kwds):
+    return RedisAPI().do_grow(*args, **kwds)
+
+
+@bollard.task(name='api.redis.create-backup', exclusive=True)
+def create_backup(*args, **kwds):
+    return RedisAPI().do_backup(*args, **kwds)
+
+
+@bollard.task(name='api.redis.create-databundle', exclusive=True)
+def create_databundle(*args, **kwds):
+    return RedisAPI().do_databundle(*args, **kwds)

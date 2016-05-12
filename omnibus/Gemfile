@@ -1,7 +1,0 @@
-source 'https://rubygems.org'
-
-#gem 'omnibus', '~> 2.0.0'
-# TODO: get name of a tag which corresponds to a latest ver
-gem 'fpm'
-gem 'omnibus', :git => 'git://github.com/Scalr/omnibus.git', :ref => '992c6753699b31221f857fac4bc2959b2c39c227'
-gem 'omnibus-software', :git => 'git://github.com/Scalr/omnibus-software.git', :ref => '7eb0998979dffb2c5cb5b7ff272d55ab9fdb8009'

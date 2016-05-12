@@ -12,11 +12,11 @@ import logging
 from scalarizr.bus import bus
 from scalarizr.messaging import Messages
 from scalarizr import storage2
-from scalarizr.handlers import HandlerError, ServiceCtlHandler, build_tags
+from scalarizr.handlers import HandlerError, ServiceCtlHandler
 from scalarizr.config import BuiltinBehaviours
 from scalarizr.util import initdv2, software, dns, cryptotool
 from scalarizr.node import __node__
-from scalarizr.linux import iptables, system, os as os_mod
+from scalarizr.linux import iptables, system, pkgmgr, os as os_mod
 import scalarizr.services.rabbitmq as rabbitmq_svc
 
 
@@ -62,7 +62,7 @@ class RabbitMQHandler(ServiceCtlHandler):
         bus.on("init", self.on_init)
 
         self._logger = logging.getLogger(__name__)
-        self.rabbitmq = rabbitmq_svc.rabbitmq
+        self.rabbitmq = rabbitmq_svc.RabbitMQ()
         self.service = initdv2.lookup(BuiltinBehaviours.RABBITMQ)
         self._service_name = BEHAVIOUR
         self.on_reload()
@@ -83,11 +83,8 @@ class RabbitMQHandler(ServiceCtlHandler):
         bus.on("before_host_down", self.on_before_host_down)
 
         if os_mod.redhat_family:
-            try:
-                self._patch_selinux()
-            except:
-                e = sys.exc_info()[1]
-                self._logger.warning('Setting selinux boolean for rabbitmq-server failed: {0}'.format(e))
+            self._patch_selinux()   
+
 
     def on_start(self):
         self._insert_iptables_rules()
@@ -176,7 +173,7 @@ class RabbitMQHandler(ServiceCtlHandler):
             if message.node_type != __rabbitmq__['node_type']:
                 self._logger.info('Changing node type to %s' % message.node_type)
 
-                disk_node = message.node_type == rabbitmq_svc.NodeTypes.DISK
+                disk_node = message.node_type == 'disk'
 
                 cluster_nodes = self._get_cluster_nodes()
                 nodes_to_cluster_with = []
@@ -208,6 +205,8 @@ class RabbitMQHandler(ServiceCtlHandler):
     def on_HostInit(self, message):
         if not BuiltinBehaviours.RABBITMQ in message.behaviour:
             return
+        if message.farm_role_id != __node__['farm_role_id']:
+            return
 
         if message.local_ip != self.platform.get_private_ip():
             hostname = rabbitmq_svc.RABBIT_HOSTNAME_TPL % message.server_index
@@ -218,6 +217,8 @@ class RabbitMQHandler(ServiceCtlHandler):
 
     def on_HostDown(self, message):
         if not BuiltinBehaviours.RABBITMQ in message.behaviour:
+            return
+        if message.farm_role_id != __node__['farm_role_id']:
             return
         dns.ScalrHosts.delete(message.local_ip)
 
@@ -238,7 +239,12 @@ class RabbitMQHandler(ServiceCtlHandler):
                     ' -kernel inet_dist_listen_max {0}"\n'.format(RABBITMQ_CLUSTERING_PORT))
 
     def _patch_selinux(self):
-        system(['semanage', 'permissive', '-a', 'rabbitmq_beam_t'])
+        try:
+            pkgmgr.installed('policycoreutils-python')
+            system(['semanage', 'permissive', '-a', 'rabbitmq_beam_t'])
+        except:
+            e = sys.exc_info()[1]
+            self._logger.warning('Setting permissive selinux policy for rabbitmq context failed: {0}'.format(e))
 
     def on_host_init_response(self, message):
         log = bus.init_op.logger
@@ -285,7 +291,6 @@ class RabbitMQHandler(ServiceCtlHandler):
         volume_config = rabbitmq_data.pop('volume_config')
         volume_config['mpoint'] = DEFAULT_STORAGE_PATH
         rabbitmq_data['volume'] = storage2.volume(volume_config)
-        rabbitmq_data['volume'].tags = self.rabbitmq_tags
 
         __rabbitmq__.update(rabbitmq_data)
 
@@ -336,7 +341,7 @@ class RabbitMQHandler(ServiceCtlHandler):
         self._logger.debug('Nodes to cluster with: %s' %
                                         nodes_to_cluster_with)
 
-        is_disk_node = self.rabbitmq.node_type == rabbitmq_svc.NodeTypes.DISK
+        is_disk_node = self.rabbitmq.node_type == 'disk'
 
         self_hostname = __rabbitmq__['hostname']
 
@@ -375,9 +380,6 @@ class RabbitMQHandler(ServiceCtlHandler):
         self._logger.debug('Updating HostUp message with %s' % msg_data)
         message.rabbitmq = msg_data
 
-    @property
-    def rabbitmq_tags(self):
-        return build_tags(BEHAVIOUR, 'active')
 
     def _get_cluster_nodes(self):
         nodes = []

@@ -1,38 +1,44 @@
-from __future__ import with_statement
 """
 Created on Nov 25, 2011
-
 @author: marat
-
 """
 
-
-import os
-import re
+import binascii
 import glob
 import logging
+from multiprocessing import pool
+import os
 import platform
+import re
+import signal
+import subprocess
 import threading
 import time
-import signal
-import binascii
 import weakref
-import subprocess
 
-from multiprocessing import pool
-
-from scalarizr import rpc, linux
+from scalarizr import rpc
+from scalarizr import handlers
 from scalarizr.api import operation as operation_api
 from scalarizr.bus import bus
-from scalarizr.node import __node__
-from scalarizr import util
-from scalarizr.util import system2, dns
-from scalarizr.linux import mount
-from scalarizr.util import kill_childs, Singleton
-from scalarizr.queryenv import ScalingMetric
-from scalarizr.api.binding import jsonrpc_http
 from scalarizr.handlers import script_executor
+from scalarizr.handlers.chef import ChefClient
+from scalarizr.handlers.chef import ChefSolo
+from scalarizr.linux import mount
+from scalarizr.node import __node__
+from scalarizr.queryenv import ScalingMetric
+from scalarizr.util import kill_childs
+from scalarizr.util import Singleton
+from scalarizr.messaging import Messages
+from scalarizr.messaging.p2p.store import P2pMessageStore
 
+from common.utils.facts import fact
+from agent.tasks import sys as sys_tasks
+from common.utils import sysutil
+if fact['os']['name'] != 'windows':
+    import augeas
+else:
+    from win32com import client
+    from common.utils.winutil import coinitialized
 
 LOG = logging.getLogger(__name__)
 
@@ -47,11 +53,15 @@ class _ScalingMetricStrategy(object):
     def _get_execute(metric):
         if not os.access(metric.path, os.X_OK):
             raise BaseException("File is not executable: '%s'" % metric.path)
-  
+
         exec_timeout = 3
-        close_fds = not linux.os.windows_family
-        proc = subprocess.Popen(metric.path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=close_fds)
- 
+        close_fds = fact['os']['name'] != 'windows'
+        proc = subprocess.Popen(
+            metric.path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=close_fds)
+
         timeout_time = time.time() + exec_timeout
         while time.time() < timeout_time:
             if proc.poll() is None:
@@ -66,15 +76,15 @@ class _ScalingMetricStrategy(object):
             else:
                 os.kill(proc.pid, signal.SIGTERM)
             raise BaseException('Timeouted')
-                                
+
         stdout, stderr = proc.communicate()
-        
+
         if proc.returncode > 0:
             raise BaseException(stderr if stderr else 'exitcode: %d' % proc.returncode)
-        
+
         return stdout.strip()
-  
-  
+
+
     @staticmethod
     def _get_read(metric):
         try:
@@ -82,7 +92,7 @@ class _ScalingMetricStrategy(object):
                 value = fp.readline()
         except IOError:
             raise BaseException("File is not readable: '%s'" % metric.path)
-  
+
         return value.strip()
 
 
@@ -91,11 +101,15 @@ class _ScalingMetricStrategy(object):
         error = ''
         try:
             if metric.retrieve_method == ScalingMetric.RetriveMethod.EXECUTE:
-                value = float(_ScalingMetricStrategy._get_execute(metric))
+                value = _ScalingMetricStrategy._get_execute(metric)
             elif metric.retrieve_method == ScalingMetric.RetriveMethod.READ:
-                value = float(_ScalingMetricStrategy._get_read(metric))
+                value = _ScalingMetricStrategy._get_read(metric)
             else:
                 raise BaseException('Unknown retrieve method %s' % metric.retrieve_method)
+            try:
+                value = float(value)
+            except:
+                raise ValueError("Can't convert metric value to float: {!r}".format(value))
         except (BaseException, Exception), e:
             value = 0.0
             error = str(e)[0:255]
@@ -106,11 +120,8 @@ class _ScalingMetricStrategy(object):
 class SystemAPI(object):
     """
     Pluggable API to get system information similar to SNMP, Facter(puppet), Ohai(chef).
-
     Namespace::
-
         system
-
     """
 
     __metaclass__ = Singleton
@@ -123,7 +134,7 @@ class SystemAPI(object):
     _LOG_FILE = '/var/log/scalarizr.log'
     _DEBUG_LOG_FILE = '/var/log/scalarizr_debug.log'
     _UPDATE_LOG_FILE = '/var/log/scalarizr_update.log'
-
+    _CENTOS_NETWORK_CFG = '/etc/sysconfig/network'
 
     def __init__(self):
         self._op_api = operation_api.OperationAPI()
@@ -138,18 +149,15 @@ class SystemAPI(object):
         """
         :type extension: object
         :param extension: Object with some callables to extend SysInfo public interface
-
         Note::
-
             Duplicates are resolved by overriding old function with a new one
-
         """
 
         for name in dir(extension):
             attr = getattr(extension, name)
             if not name.startswith('_') and callable(attr):
                 if hasattr(self, name):
-                    LOG.warn('Duplicate attribute %s. Overriding %s with %s', 
+                    LOG.warn('Duplicate attribute %s. Overriding %s with %s',
                             name, getattr(self, name), attr)
                 setattr(self, name, attr)
 
@@ -170,80 +178,46 @@ class SystemAPI(object):
 
 
     @rpc.command_method
+    def force_resume(self):
+        """Forces init after reboot.
+
+        Works only when last RebootFinish date is greater then uptime,
+        there is no such message in history.
+        """
+        ln = bus.messaging_service.get_consumer().listeners[0]
+        lifecycle = [hdlr \
+            for hdlr in ln.get_handlers_chain() \
+            if hdlr.__class__.__module__ == 'scalarizr.handlers.lifecycle' and \
+                    hdlr.__class__.__name__ == 'LifeCycleHandler'][0]
+
+        LOG.info('Scalarizr resumed after reboot (forced!)')
+        lifecycle._start_after_reboot()
+        return True
+
+
+    @rpc.command_method
     def reboot(self):
-        if os.fork():
-            return
-        util.daemonize()
-        system2(('reboot',))
-        exit(0)
+        sysutil.reboot()
 
     @rpc.command_method
     def set_hostname(self, hostname=None):
         """
         Updates server's FQDN.
-
-        :param hostname: Fully Qualified Domain Name to set for this host
-        :type hostname: str
-
+        :param str hostname: Fully Qualified Domain Name to set for this host
         Example::
-
             api.system.set_hostname(hostname = "myhostname.com")
-
         """
-        assert hostname
-        system2(('hostname', hostname))
-
-        with open(self._HOSTNAME, 'w+') as fp:
-            fp.write(hostname)
-        ip = __node__['private_ip']
-        hosts = dns.HostsFile()
-        hosts.map(ip, hostname)
-
-        '''
-        TODO: test and correct this code 
-        # changing permanent hostname
-        try:
-            if os.path.exists(self._HOSTNAME):
-                with open(self._HOSTNAME, 'r') as fp:
-                    old_hn = fp.readline().strip()
-            with open(self._HOSTNAME, 'w+') as fp:
-                fp.write('%s\n' % hostname)
-        except:
-            raise Exception, 'Can`t write file `%s`.' % \
-                self._HOSTNAME, sys.exc_info()[2]
-        # changing runtime hostname
-        try:
-            system2(('hostname', hostname))
-        except:
-            with open(self._HOSTNAME, 'w+') as fp:
-                fp.write('%s\n' % old_hn)
-            raise Exception('Failed to change the hostname to `%s`' % hostname)
-        # changing hostname in hosts file
-        if old_hn:
-            hosts = dns.HostsFile()
-            hosts._reload()
-            if hosts._hosts:
-                for index in range(0, len(hosts._hosts)):
-                    if isinstance(hosts._hosts[index], dict) and \
-                                    hosts._hosts[index]['hostname'] == old_hn:
-                        hosts._hosts[index]['hostname'] = hostname
-                hosts._flush()
-        '''
-        return hostname
-
+        sys_tasks.set_hostname(hostname, reboot=False)
 
     @rpc.query_method
     def get_hostname(self):
         """
         :return: server's FQDN.
         :rtype: list
-
         Example::
-
             "ec2-50-19-134-77.compute-1.amazonaws.com"
         """
-        return system2(('hostname', ))[0].strip()
-
+        return fact['hostname']
 
     @rpc.query_method
     def block_devices(self):
@@ -251,12 +225,7 @@ class SystemAPI(object):
         :return: List of block devices including ramX and loopX
         :rtype: list
         """
-
-        lines = self._readlines(self._DISKSTATS)
-        devicelist = []
-        for value in lines:
-            devicelist.append(value.split()[2])
-        return devicelist
+        return fact['block_devices']
 
 
     @rpc.query_method
@@ -264,9 +233,8 @@ class SystemAPI(object):
         """
         :return: general system information.
         :rtype: dict
-        
-        Example::
 
+        Example::
             {'kernel_name': 'Linux',
             'kernel_release': '2.6.41.10-3.fc15.x86_64',
             'kernel_version': '#1 SMP Mon Jan 23 15:46:37 UTC 2012',
@@ -274,7 +242,6 @@ class SystemAPI(object):
             'machine': 'x86_64',
             'processor': 'x86_64',
             'hardware_platform': 'x86_64'}
-
         """
 
         uname = platform.uname()
@@ -285,68 +252,36 @@ class SystemAPI(object):
             'kernel_version': uname[3],
             'machine': uname[4],
             'processor': uname[5],
-            'hardware_platform': linux.os['arch']
+            'hardware_platform': fact['os']['arch']
         }
 
+    @rpc.query_method
+    def uptime(self):
+        with open('/proc/uptime') as fp:
+            return float(fp.read().strip().split()[0])
 
     @rpc.query_method
     def dist(self):
         """
         :return: Linux distribution info.
         :rtype: dict
-
         Example::
-
             {'distributor': 'ubuntu',
             'release': '12.04',
             'codename': 'precise'}
-
         """
         return {
-            'distributor': linux.os['name'].lower(),
-            'release': str(linux.os['release']),
-            'codename': linux.os['codename']
+            'distributor': fact['os']['name'],
+            'release': str(fact['os']['release']),
+            'codename': fact['os']['codename']
         }
-
-
-    @rpc.query_method
-    def pythons(self):
-        """
-        :return: installed Python versions
-        :rtype: list
-
-        Example::
-
-            ['2.7.2+', '3.2.2']
-
-        """
-
-        res = []
-        for path in self._PATH:
-            pythons = glob.glob(os.path.join(path, 'python[0-9].[0-9]'))
-            for el in pythons:
-                res.append(el)
-        #check full correct version
-        LOG.debug('variants of python bin paths: `%s`. They`ll be checking now.', list(set(res)))
-        result = []
-        for pypath in list(set(res)):
-            (out, err, rc) = system2((pypath, '-V'), raise_exc=False)
-            if rc == 0:
-                result.append((out or err).strip())
-            else:
-                LOG.debug("Can`t execute `%s -V`, details: %s",
-                        pypath, err or out)
-        return map(lambda x: x.lower().replace('python', '').strip(), sorted(list(set(result))))
-
 
     @rpc.query_method
     def cpu_info(self):
         """
         :return: CPU info from /proc/cpuinfo
         :rtype: list
-
         Example::
-
             [
                {
                   "bogomips":"5319.98",
@@ -375,23 +310,7 @@ class SystemAPI(object):
                }
             ]
         """
-
-        lines = self._readlines(self._CPUINFO)
-        res = []
-        index = 0
-        while index < len(lines):
-            core = {}
-            while index < len(lines):
-                if ':' in lines[index]:
-                    tmp = map(lambda x: x.strip(), lines[index].split(':'))
-                    (key, value) = list(tmp) if len(list(tmp)) == 2 else (tmp, None)
-                    if key not in core.keys():
-                        core.update({key:value})
-                    else:
-                        break
-                index += 1
-            res.append(core)
-        return res
+        return fact['cpu']
 
 
     @rpc.query_method
@@ -400,24 +319,16 @@ class SystemAPI(object):
         """
         :return: CPU stat from /proc/stat.
         :rtype: dict
-        
-        Example::
 
+        Example::
             {
                 'user': 8416,
                 'nice': 0,
                 'system': 6754,
                 'idle': 147309
             }
-
         """
-        cpu = open('/proc/stat').readline().strip().split()
-        return {
-            'user': int(cpu[1]),
-            'nice': int(cpu[2]),
-            'system': int(cpu[3]),
-            'idle': int(cpu[4])
-        }
+        return fact['stat']['cpu']
 
 
     @rpc.query_method
@@ -425,9 +336,8 @@ class SystemAPI(object):
         """
         :return: Memory information from /proc/meminfo.
         :rtype: dict
-        
-        Example::
 
+        Example::
              {
                 'total_swap': 0,
                 'avail_swap': 0,
@@ -438,19 +348,7 @@ class SystemAPI(object):
                 'cached': 316756
             }
         """
-        info = {}
-        for line in open('/proc/meminfo'):
-            pairs = line.split(':', 1)
-            info[pairs[0]] = int(pairs[1].strip().split(' ')[0])
-        return {
-            'total_swap': info['SwapTotal'],
-            'avail_swap': info['SwapFree'],
-            'total_real': info['MemTotal'],
-            'total_free': info['MemFree'],
-            'shared': info.get('Shmem', 0),
-            'buffer': info['Buffers'],
-            'cached': info['Cached']
-        }
+        return fact['stat']['memory']
 
 
     @rpc.query_method
@@ -458,26 +356,21 @@ class SystemAPI(object):
         """
         :return: Load average (1, 5, 15) in 3 items list.
         :rtype: list
-
         Example::
-
             [
                0.0,      // LA1
                0.01,     // LA5
                0.05      // LA15
             ]
         """
-
-        return os.getloadavg()
+        return fact['stat']['load_average']
 
 
     @rpc.query_method
     def disk_stats(self):
         """
         :return: Disks I/O statistics.
-
         Data format::
-
             {
             <device>: {
                 <read>: {
@@ -492,38 +385,16 @@ class SystemAPI(object):
                 },
             ...
             }
-
         See more at http://www.kernel.org/doc/Documentation/iostats.txt
         """
-
-
-        lines = self._readlines(self._DISKSTATS)
-        devicelist = {}
-        for value in lines:
-            params = value.split()[2:]
-            device = params[0]
-            for i in range(1, len(params)-1):
-                params[i] = int(params[i])
-            if len(params) == 12:
-                read = {'num': params[1], 'sectors': params[3], 'bytes': params[3]*512}
-                write = {'num': params[5], 'sectors': params[7], 'bytes': params[7]*512}
-            elif len(params) == 5:
-                read = {'num': params[1], 'sectors': params[2], 'bytes': params[2]*512}
-                write = {'num': params[3], 'sectors': params[4], 'bytes': params[4]*512}
-            else:
-                raise Exception, 'number of column in %s is unexpected. Count of column =\
-                     %s' % (self._DISKSTATS, len(params)+2)
-            devicelist[device] = {'write': write, 'read': read}
-        return devicelist
+        return fact['stat']['disk']
 
 
     @rpc.query_method
     def net_stats(self):
         """
         :return: Network I/O statistics.
-
         Data format::
-
             {
                 <iface>: {
                     <receive>: {
@@ -540,30 +411,14 @@ class SystemAPI(object):
                 ...
             }
         """
-
-        lines = self._readlines(self._NETSTATS)
-        res = {}
-        for row in lines:
-            if ':' not in row:
-                continue
-            row = row.split(':')
-            iface = row.pop(0).strip()
-            columns = map(lambda x: x.strip(), row[0].split())
-            res[iface] = {
-                'receive': {'bytes': columns[0], 'packets': columns[1], 'errors': columns[2]},
-                'transmit': {'bytes': columns[8], 'packets': columns[9], 'errors': columns[10]},
-            }
-
-        return res
+        return fact['stat']['net']
 
 
     @rpc.query_method
     def statvfs(self, mpoints=None):
         """
-        :return: Information about available mounted file systems (total size \ free space).
-
+        :return: Information about available mounted file systems (total size and free space).
         Request::
-
             {
                 "mpoints": [
                     "/mnt/dbstorage",
@@ -571,9 +426,7 @@ class SystemAPI(object):
                     "/non/existing/mpoint"
                 ]
             }
-
         Response::
-
             {
                "/mnt/dbstorage": {
                  "total" : 10000,
@@ -611,21 +464,20 @@ class SystemAPI(object):
         skip_fstype = ('tmpfs', 'devfs')
         ret = {}
         for m in mount.mounts():
-            if not (skip_mpoint_re.search(m.mpoint) or m.fstype in skip_fstype):
+            if m.mpoint and (not (skip_mpoint_re.search(m.mpoint) or m.fstype in skip_fstype)):
                 entry = m._asdict()
                 entry.update(self.statvfs([m.mpoint])[m.mpoint])
                 ret[m.mpoint] = entry
         return ret
 
 
-    @rpc.query_method
+    @rpc.command_method
     def scaling_metrics(self):
         """
         :return: list of scaling metrics
         :rtype: list
-        
-        Example::
 
+        Example::
             [{
                 'id': 101011,
                 'name': 'jmx.scaling',
@@ -648,7 +500,7 @@ class SystemAPI(object):
             threading.current_thread()._children = weakref.WeakKeyDictionary()
 
         wrk_pool = pool.ThreadPool(processes=10)
-        
+
         try:
             return wrk_pool.map_async(_ScalingMetricStrategy.get, scaling_metrics).get()
         finally:
@@ -657,16 +509,17 @@ class SystemAPI(object):
 
 
     @rpc.command_method
-    def execute_scripts(self, scripts=None, global_variables=None, event_name=None, 
-            role_name=None, async=False):
+    def execute_scripts(self, scripts=None, global_variables=None, event_name=None,
+            role_name=None, msg_body=None, async=False):
         def do_execute_scripts(op):
             msg = lambda: None
             msg.name = event_name
             msg.role_name = role_name
-            msg.body = {
+            msg.body = msg_body or {}
+            msg.body.update({
                 'scripts': scripts or [],
                 'global_variables': global_variables or []
-            }
+            })
             hdlr = script_executor.get_handlers()[0]
             hdlr(msg)
 
@@ -679,8 +532,12 @@ class SystemAPI(object):
         :return: stdout and stderr scripting logs
         :rtype: dict(stdout: base64encoded, stderr: base64encoded)
         '''
-        stdout_match = glob.glob(os.path.join(script_executor.logs_dir, '*%s-out.log' % exec_script_id))
-        stderr_match = glob.glob(os.path.join(script_executor.logs_dir, '*%s-err.log' % exec_script_id))
+        stdout_match = glob.glob(os.path.join(
+            script_executor.logs_dir,
+            '*%s-out.log' % exec_script_id))
+        stderr_match = glob.glob(os.path.join(
+            script_executor.logs_dir,
+            '*%s-err.log' % exec_script_id))
 
         err_rotated = ('Log file already rotatated and no more exists on server. '
                     'You can increase "Rotate scripting logs" setting under "Advanced" tab'
@@ -713,7 +570,7 @@ class SystemAPI(object):
         :return: scalarizr update log (/var/log/scalarizr.update.log on Linux)
         :rtype: str
         """
-        return binascii.b2a_base64(_get_log(self._UPDATE_LOG_FILE, -1))     
+        return binascii.b2a_base64(_get_log(self._UPDATE_LOG_FILE, -1))
 
     @rpc.query_method
     def get_log(self):
@@ -721,7 +578,7 @@ class SystemAPI(object):
         :return: scalarizr info log (/var/log/scalarizr.log on Linux)
         :rtype: str
         """
-        return binascii.b2a_base64(_get_log(self._LOG_FILE, -1))   
+        return binascii.b2a_base64(_get_log(self._LOG_FILE, -1))
 
 
 def _get_log(logfile, maxsize=max_log_size):
@@ -734,92 +591,23 @@ def _get_log(logfile, maxsize=max_log_size):
         return 'Log file %s is not readable' % logfile
 
 
-if linux.os.windows_family:
-    from win32com import client
-    from scalarizr.util import coinitialized
-    import ctypes
-    from ctypes import wintypes
-
+if fact['os']['name'] == 'windows':
     class WindowsSystemAPI(SystemAPI):
+        _LOG_FILE = os.path.join(__node__['log_dir'], 'scalarizr.log')
+        _DEBUG_LOG_FILE = os.path.join(__node__['log_dir'], 'scalarizr_debug.log')
+        _UPDATE_LOG_FILE = os.path.join(__node__['log_dir'], 'scalarizr_update.log')
+        _pending_hostname = None
 
-        _LOG_FILE = r'C:\Program Files\Scalarizr\var\log\scalarizr.log'
-        _DEBUG_LOG_FILE = r'C:\Program Files\Scalarizr\var\log\scalarizr_debug.log'
-        _UPDATE_LOG_FILE = r'C:\Program Files\Scalarizr\var\log\scalarizr_update.log'  
-
-        @coinitialized
-        @rpc.command_method
-        def reboot(self):
-            updclient = jsonrpc_http.HttpServiceProxy('http://localhost:8008', 
-                            bus.cnf.key_path(bus.cnf.DEFAULT_KEY))
-            try:
-                dont_do_it = updclient.status()['state'].startswith('in-progress')
-            except:
-                pass
-            else:
-                if dont_do_it:
-                    raise Exception('Reboot not allowed, cause Scalarizr update is in-progress')
-            wmi = client.GetObject('winmgmts:')
-            for wos in wmi.InstancesOf('Win32_OperatingSystem'):
-                if wos.Primary:
-                    # SCALARIZR-1609
-                    # XXX: Function call happens without () here for some reason,
-                    # as just `wos.Reboot`. Then it returns 0 and we try to call it.
-                    # Check if this strange behavior persists when we upgrade
-                    # to the latest pywin32 version (219).
-                    try:
-                        wos.Reboot()
-                    except TypeError:
-                        pass
-
-        @coinitialized
         @rpc.command_method
         def set_hostname(self, hostname=None):
-            # Can't change hostname without reboot or knowing administrator password
-            # Probably a way: http://timnew.github.io/blog/2012/04/13/powershell-script-to-rename-computer-without-reboot/
-            raise NotImplementedError('Not available on windows platform')
+            super(WindowsSystemAPI, self).set_hostname(hostname)
+            self._pending_hostname = hostname
 
-        @coinitialized
         @rpc.query_method
         def get_hostname(self):
-            try:
-                wmi = client.GetObject('winmgmts:')
-                for computer in wmi.InstancesOf('Win32_ComputerSystem'):
-                    return computer.Name
-            except:
-                return ''
-
-        @coinitialized
-        @rpc.query_method
-        def disk_stats(self):
-            wmi = client.GetObject('winmgmts:')
-
-            res = dict()
-            for disk in wmi.InstancesOf('Win32_PerfRawData_PerfDisk_LogicalDisk'):
-                # Skip Total
-                if disk.Name == '_Total':
-                    continue
-
-                res[disk.Name] = dict(
-                    read=dict(
-                        bytes=int(disk.AvgDiskBytesPerRead)
-                    ),
-                    write=dict(
-                        bytes=int(disk.AvgDiskBytesPerWrite)
-                    )
-                )
-            return res
-
-        @coinitialized
-        @rpc.query_method
-        def block_devices(self):
-            wmi = client.GetObject('winmgmts:')
-
-            res = list()
-            for disk in wmi.InstancesOf('Win32_PerfRawData_PerfDisk_LogicalDisk'):
-                if disk.Name == '_Total':
-                    continue
-                res.append(disk.Name)
-            return res
+            if self._pending_hostname:
+                return self._pending_hostname
+            return super(WindowsSystemAPI, self).get_hostname()
 
         @coinitialized
         @rpc.query_method
@@ -829,65 +617,18 @@ if linux.os.windows_family:
 
         @coinitialized
         @rpc.query_method
-        def net_stats(self):
-            class MIB_IFROW(ctypes.Structure):
-                _fields_ = [
-                    ('wszName', wintypes.WCHAR*256),
-                    ('dwIndex', wintypes.DWORD),
-                    ('dwType', wintypes.DWORD),
-                    ('dwMtu', wintypes.DWORD),
-                    ('dwSpeed', wintypes.DWORD),
-                    ('dwPhysAddrLen', wintypes.DWORD),
-                    ('bPhysAddr', wintypes.BYTE*8),
-                    ('dwAdminStatus', wintypes.DWORD),
-                    ('dwOperStatus', wintypes.DWORD),
-                    ('dwLastChange', wintypes.DWORD),
-                    ('dwInOctets', wintypes.DWORD),
-                    ('dwInUcastPkts', wintypes.DWORD),
-                    ('dwInNUcastPkts', wintypes.DWORD),
-                    ('dwInDiscards', wintypes.DWORD),
-                    ('dwInErrors', wintypes.DWORD),
-                    ('dwInUnknownProtos', wintypes.DWORD),
-                    ('dwOutOctets', wintypes.DWORD),
-                    ('dwOutUcastPkts', wintypes.DWORD),
-                    ('dwOutNUcastPkts', wintypes.DWORD),
-                    ('dwOutDiscards', wintypes.DWORD),
-                    ('dwOutErrors', wintypes.DWORD),
-                    ('dwOutQlen', wintypes.DWORD),
-                    ('dwDescrlen', wintypes.DWORD),
-                    ('bDescr', wintypes.BYTE*256),
-                ]
-
+        def uptime(self):
+            # pylint: disable=W0603
             wmi = client.GetObject('winmgmts:')
-
-            adapters = [adapter for adapter in wmi.InstancesOf('win32_networkadapter')
-                    if adapter.PhysicalAdapter is True]
-
-            iphlpapi = ctypes.windll.LoadLibrary('iphlpapi')
-
-            res = dict()
-            for adapter in adapters:
-                if_entry = MIB_IFROW()
-                if_entry.dwIndex = adapter.InterfaceIndex
-                iphlpapi.GetIfEntry(ctypes.pointer(if_entry))
-
-                res[adapter.Name] = {
-                    'receive': {
-                        'bytes': int(if_entry.dwInOctets),
-                        'packets': int(if_entry.dwInUcastPkts),
-                        'errors': int(if_entry.dwInErrors),
-                    },
-                    'transmit': {
-                        'bytes': int(if_entry.dwOutOctets),
-                        'packets': int(if_entry.dwOutUcastPkts),
-                        'errors': int(if_entry.dwOutErrors),
-                    },
-                }
-            return res
-
-        @rpc.query_method
-        def load_average(self):
-            raise Exception('Not available on windows platform')
+            win_os = next(iter(wmi.InstancesOf('Win32_OperatingSystem')))
+            local_time, tz_op, tz_hh60mm = re.split(r'(\+|\-)', win_os.LastBootUpTime)
+            local_time = local_time.split('.')[0]
+            local_time = time.mktime(time.strptime(local_time, '%Y%m%d%H%M%S'))
+            tz_seconds = int(tz_hh60mm) * 60
+            if tz_op == '+':
+                return time.time() - local_time + tz_seconds
+            else:
+                return time.time() - local_time - tz_seconds
 
         @rpc.query_method
         def uname(self):
@@ -895,45 +636,6 @@ if linux.os.windows_family:
             return dict(zip(
                 ('system', 'node', 'release', 'version', 'machine', 'processor'), uname
             ))
-
-        @coinitialized
-        @rpc.query_method
-        def cpu_stat(self):
-            raw_idle = ctypes.c_uint64(0)
-            raw_kernel = ctypes.c_uint64(0)
-            raw_user = ctypes.c_uint64(0)
-
-            ctypes.windll.kernel32.GetSystemTimes(
-                    ctypes.byref(raw_idle), ctypes.byref(raw_kernel), ctypes.byref(raw_user))
-
-            # http://msdn.microsoft.com/en-us/library/windows/desktop/ms724284(v=vs.85).aspx
-            # man proc
-            idle = raw_idle.value * 1e-5
-            kernel = raw_kernel.value * 1e-5
-            user = raw_user.value * 1e-5
-            # kernel time includes idle time
-            system = kernel - idle
-
-            return {
-                'user': int(user),
-                'system': int(system),
-                'idle': int(idle),
-                'nice': 0,
-            }
-
-        @coinitialized
-        @rpc.query_method
-        def mem_info(self):
-            wmi = client.GetObject('winmgmts:')
-
-            meminfo = wmi.InstancesOf('Win32_PerfFormattedData_PerfOS_Memory')[0]
-            sysinfo = wmi.InstancesOf('Win32_ComputerSystem')[0]
-            return {
-                'total_swap': int(meminfo.CommitLimit) / 1024,
-                'avail_swap': (int(meminfo.CommitLimit) - int(meminfo.CommittedBytes)) / 1024,
-                'total_real': int(sysinfo.Properties_('totalphysicalmemory')) / 1024,
-                'total_free': int(meminfo.Properties_('AvailableKBytes'))
-            }
 
         @coinitialized
         @rpc.query_method
@@ -956,14 +658,14 @@ if linux.os.windows_family:
         @coinitialized
         @rpc.query_method
         def mounts(self):
-            wmi = client.GetObject('winmgmts:') 
+            wmi = client.GetObject('winmgmts:')
 
             ret = {}
             for disk in wmi.InstancesOf('Win32_LogicalDisk'):
                 letter = disk.DeviceId[0].lower()
                 entry = {
                     'device': letter,
-                    'mpoint': letter       
+                    'mpoint': letter
                 }
                 entry.update(self._format_statvfs(disk))
                 ret[letter] = entry
@@ -971,10 +673,9 @@ if linux.os.windows_family:
 
         def _format_statvfs(self, disk):
             return {
-                'total': int(disk.Size) / 1024,  # Kb
-                'free': int(disk.FreeSpace) / 1024  # Kb        
+                'total': int(disk.Size) / 1024 if disk.Size else None,  # Kb
+                'free': int(disk.FreeSpace) / 1024 if disk.FreeSpace else None  # Kb
             }
 
 
     SystemAPI = WindowsSystemAPI
-

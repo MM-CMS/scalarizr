@@ -1,14 +1,10 @@
-import sys
-import inspect
 
-from scalarizr.node import __node__
 from scalarizr.bus import bus
 from scalarizr.adm.command import Command
 from scalarizr.adm.command import CommandError
-from scalarizr.adm.util import new_queryenv
+from scalarizr.queryenv import new_queryenv
 from scalarizr.api.service import ServiceAPI
 from scalarizr.api.service import behavior_apis
-from scalarizr.api import operation
 
 
 class Reconfigure(Command):
@@ -22,7 +18,7 @@ class Reconfigure(Command):
         # if behavior not in behavior_apis:
         #     raise CommandError('Unknown behavior.')
 
-        bus.queryenv_service = new_queryenv()
+        bus.queryenv_service = new_queryenv(autoretry=False)
         api = ServiceAPI()
         # api.init_service()
         if behavior and behavior not in behavior_apis:

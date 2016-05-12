@@ -1,4 +1,3 @@
-from __future__ import with_statement
 '''
 Created on Dec 5, 2009
 
@@ -9,17 +8,13 @@ import logging
 import threading
 import time
 import uuid
-import httplib
-import urllib2
 import sys
+import requests
 from copy import deepcopy
 
-from scalarizr import messaging, util
-from scalarizr.bus import bus
-from scalarizr.messaging import p2p
-from scalarizr.util import urltool
+from scalarizr import messaging
 from scalarizr.node import __node__
-from scalarizr.messaging.p2p import P2pMessage
+from scalarizr.messaging.p2p.store import P2pMessage, P2pMessageStore
 
 
 class P2pMessageProducer(messaging.MessageProducer):
@@ -35,12 +30,12 @@ class P2pMessageProducer(messaging.MessageProducer):
         messaging.MessageProducer.__init__(self)
         self.endpoint = endpoint
         if retries_progression:
-            self.retries_progression = util.split_ex(retries_progression, ",")
+            self.retries_progression = [x.strip() for x in retries_progression.split(",")]
         else:
             self.no_retry = True
 
         self._logger = logging.getLogger(__name__)
-        self._store = p2p.P2pMessageStore()
+        self._store = P2pMessageStore()
         self._stop_delivery = threading.Event()
 
         self._local = threading.local()
@@ -59,24 +54,14 @@ class P2pMessageProducer(messaging.MessageProducer):
 
         if not self.no_retry:
             if not hasattr(self._local, "interval"):
-                for k, v in self._local_defaults.items():
+                for k, v in list(self._local_defaults.items()):
                     setattr(self._local, k, v)
 
             self._local.delivered = False
-            #while not self._local.delivered and not self._stop_delivery.isSet():
             while not self._local.delivered:
                 if self._local.interval:
                     self._logger.debug("Sleep %d seconds before next attempt", self._local.interval)
                     time.sleep(self._local.interval)
-                    # FIXME: SIGINT hanged
-                    # strace:
-                    # --- SIGINT (Interrupt) @ 0 (0) ---
-                    # rt_sigaction(SIGINT, {0x36b9210, [], 0}, {0x36b9210, [], 0}, 8) = 0
-                    # sigreturn()                             = ? (mask now [])
-
-                    # futex(0xa3f5d78, FUTEX_WAIT_PRIVATE, 0, NUL
-                #if not self._stop_delivery.isSet():
-                #       self._send0(queue, message, self._delivered_cb, self._undelivered_cb)
                 self._send0(queue, message, self._delivered_cb, self._undelivered_cb)
         else:
             self._send0(queue, message, self._delivered_cb, self._undelivered_cb_raises)
@@ -99,6 +84,7 @@ class P2pMessageProducer(messaging.MessageProducer):
         return int(self.retries_progression[self._local.next_retry_index]) * 60.0
 
     def _send0(self, queue, message, success_callback=None, fail_callback=None):
+        response = None
         try:
             use_json = __node__['message_format'] == 'json'
             data = message.tojson() if use_json else message.toxml()
@@ -123,47 +109,33 @@ class P2pMessageProducer(messaging.MessageProducer):
                 data = f(self, queue, data, headers)
 
             url = self.endpoint + "/" + queue
-            req = urllib2.Request(url, data, headers)
-            opener = urllib2.build_opener(urltool.HTTPRedirectHandler())
-            opener.open(req)
-
+            response = requests.post(url, data=data, headers=headers, verify=False)
+            response.raise_for_status()
             self._message_delivered(queue, message, success_callback)
 
         except:
             e = sys.exc_info()[1]
-            # Python < 2.6 raise exception on 2xx > 200 http codes except
-            if isinstance(e, urllib2.HTTPError):
-                if e.code == 201:
-                    self._message_delivered(queue, message, success_callback)
-                    return
 
-            self._logger.warning("Message '%s' not delivered (message_id: %s)", message.name, message.id)
+            self._logger.warning("Message '%s' not delivered (message_id: %s)",
+                message.name, message.id)
             self.fire("send_error", e, queue, message)
 
-            msg = None
-            if isinstance(e, urllib2.HTTPError):
-                if e.code == 401:
-                    self._logger.warn("Cannot authenticate on message server. %s", e.msg)
-                elif e.code == 400:
-                    self._logger.warn("Malformed request. %s", e.msg)
+            if isinstance(e, requests.RequestException):
+                if isinstance(e, requests.ConnectionError):
+                    self._logger.warn("Connection error: %s", e)
+                elif response.status_code == 401:
+                    self._logger.warn("Cannot authenticate on message server. %s", e)
+                elif response.status_code == 400:
+                    self._logger.warn("Malformed request. %s", e)
                 else:
                     self._logger.warn("Cannot post message to %s. %s", url, e)
-            elif isinstance(e, urllib2.URLError):
-                msg = ("Scalr messaging endpoint '{0}' is unreachable. "
-                        "Cause: {1}").format(self.endpoint, e)
-            elif isinstance(e, httplib.HTTPException):
-                msg = ("Scalr messaging endpoint '{0}' answered with invalid HTTP response. "
-                        "Cause: {1}").format(self.endpoint, e)
+                if response and response.status_code in (509, 400, 403):
+                    raise
             else:
                 self._logger.warn('Caught exception', exc_info=sys.exc_info())
 
-            if msg:
-                self._logger.warn(msg)
-
-            # Call user code
             if fail_callback:
                 fail_callback(queue, message, e)
-
 
     def _message_delivered(self, queue, message, callback=None):
         if message.name not in ('Log', 'OperationDefinition',

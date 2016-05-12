@@ -31,4 +31,22 @@ CREATE TABLE state (
 	"value" TEXT
 );
 
+DROP TABLE IF EXISTS tasks;
+CREATE TABLE tasks (
+    "task_id" TEXT PRIMARY KEY,
+    "name" TEXT,
+    "args" TEXT,
+    "kwds" TEXT,
+    "state" TEXT,
+    "result" TEXT,
+    "traceback" TEXT,
+    "start_date" TEXT,
+    "end_date" TEXT,
+    "worker_id" TEXT,
+    "soft_timeout" FLOAT,
+    "hard_timeout" FLOAT,
+    "callbacks" TEXT,
+    "meta" TEXT
+);
+
 COMMIT;

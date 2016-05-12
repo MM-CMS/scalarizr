@@ -159,7 +159,7 @@ class MongoDBAPI(BehaviorAPI):
             status = 'Fail'
             error = str(e)
 
-        return {'status':status, 'error':error}
+        return {'status': status, 'error': error}
 
 
     @rpc.command_method
@@ -181,7 +181,7 @@ class MongoDBAPI(BehaviorAPI):
             status = 'Fail'
             error = str(e)
 
-        return {'status':status, 'error':error}
+        return {'status': status, 'error': error}
 
     @classmethod
     def do_check_software(cls, system_packages=None):
@@ -301,4 +301,3 @@ class MongoDBAPI(BehaviorAPI):
             for error in errors:
                 if isinstance(error, cls):
                     raise error
-

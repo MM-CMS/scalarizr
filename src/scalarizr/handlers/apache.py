@@ -18,6 +18,7 @@ from scalarizr.handlers import Handler
 from scalarizr.messaging import Messages
 from scalarizr.services import PresetProvider, BaseConfig
 from scalarizr.config import BuiltinBehaviours, ScalarizrState
+from scalarizr.util import firstmatched
 
 
 LOG = logging.getLogger(__name__)
@@ -49,6 +50,13 @@ class ApacheHandler(Handler):
 
         bus.on(init=self.on_init)
         bus.define_events("apache_rpaf_reload")
+
+    def _defer_init(self):
+        if not __apache__["ssl_conf_path"]:  # SCALARIZR-2220
+            __apache__["ssl_conf_path"] = firstmatched(
+                os.path.exists, (
+                    "/etc/apache2/sites-available/default-ssl",
+                    "/etc/apache2/sites-available/default-ssl.conf"))
 
     def on_init(self):
         bus.on(
@@ -89,6 +97,7 @@ class ApacheHandler(Handler):
                 self._initial_preset = apache_data["preset"]
 
     def on_before_host_up(self, message):
+        self._defer_init()
         op_log = bus.init_op.logger
         self.api.stop_service("Configuring Apache Web Server")
         self.api.init_service()

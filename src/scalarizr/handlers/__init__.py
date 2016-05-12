@@ -2,6 +2,7 @@ from __future__ import with_statement
 
 from scalarizr import config, util, linux, api, exceptions
 from scalarizr.bus import bus
+from scalarizr.api import operation
 from scalarizr.node import __node__
 from scalarizr.config import ScalarizrState, STATE
 from scalarizr.messaging import Queues, Message, Messages
@@ -41,22 +42,34 @@ class Handler(object):
             msg.body['platform_access_data'] = pl.get_access_data()
         return msg
 
-    def send_message(self, msg_name, msg_body=None, msg_meta=None, broadcast=False,
-                                    queue=Queues.CONTROL, wait_ack=False, wait_subhandler=False, new_crypto_key=None):
+    def send_message(self, msg_name, 
+            msg_body=None, 
+            msg_meta=None, 
+            broadcast=False,
+            queue=Queues.CONTROL, 
+            handle_host_init=False,
+            handle_before_host_up=False,
+            new_crypto_key=None):
         srv = bus.messaging_service
         msg = msg_name if isinstance(msg_name, Message) else \
                         self.new_message(msg_name, msg_body, msg_meta, broadcast)
-        srv.get_producer().send(queue, msg)
         cons = srv.get_consumer()
 
         if new_crypto_key:
-            cnf = bus.cnf
-            cnf.write_key(cnf.DEFAULT_KEY, new_crypto_key)
+            cons.lock()
 
-        if wait_ack:
-            cons.wait_acknowledge(msg)
-        elif wait_subhandler:
-            cons.wait_subhandler(msg)
+        srv.get_producer().send(queue, msg)
+
+        if new_crypto_key:
+            cnf = bus.cnf
+            self._logger.debug('Writing new crypto key to disk')
+            cnf.write_key(cnf.DEFAULT_KEY, new_crypto_key)
+            cons.unlock()
+
+        if handle_host_init:
+            return cons.handle_host_init(msg)
+        elif handle_before_host_up:
+            return cons.handle_before_host_up(msg)
 
 
     def send_int_message(self, host, msg_name, msg_body=None, msg_meta=None, broadcast=False,
@@ -252,6 +265,8 @@ class MessageListener:
                     accepted_any = True
                     try:
                         handler(message)
+                    except KeyboardInterrupt:
+                        raise
                     except (BaseException, Exception), e:
                         if message.name == 'BeforeHostUp' \
                                 and message.local_ip == __node__['private_ip']:
@@ -788,19 +803,25 @@ def transfer_result_to_backup_result(mnf):
     return list(dict(path=path, size=size) for path, size in files_sizes)
 
 
-def get_role_servers(role_id=None, role_name=None):
+def _choose_host_ip(host, network=None):
+    this_server_location = __node__['cloud_location']
+    if network == None:
+        use_internal_ip = this_server_location == host.cloud_location
+    else:
+        use_internal_ip = network == 'private'
+    return host.internal_ip if use_internal_ip else host.external_ip
+
+
+def get_role_servers(role_id=None, role_name=None, network=None):
     """ Method is used to get role servers from scalr """
     if type(role_id) is int:
         role_id = str(role_id)
 
-    server_location = __node__['cloud_location']
-    queryenv = bus.queryenv_service
-    roles = queryenv.list_roles(farm_role_id=role_id, role_name=role_name)
+    _queryenv = bus.queryenv_service
+    roles = _queryenv.list_roles(farm_role_id=role_id, role_name=role_name)
     servers = []
     for role in roles:
-        ips = [h.internal_ip if server_location == h.cloud_location else
-               h.external_ip
-               for h in role.hosts]
+        ips = [_choose_host_ip(h, network) for h in role.hosts]
         servers.extend(ips)
 
     return servers
@@ -820,3 +841,39 @@ def sync_globals(glob_vars=None):
                 v = v.decode('utf-8')
             fp.write(u'export %s="%s"\n' % (k, v))
     os.chmod(globals_path, 0644)
+
+
+def check_supported_behaviors(*args):
+    # *args to adaptee as a handler function
+    if linux.os.windows:
+        return
+    system_packages = pkgmgr.package_mgr().list()
+    for behavior in __node__['behavior']:
+        if behavior in ['base', 'mongodb'] or behavior not in api.api_routes.keys():
+            continue
+        try:
+            api_cls = util.import_class(api.api_routes[behavior])
+            api_cls.check_software(system_packages)
+        except exceptions.NotFound as e:
+            LOG.error(e)
+        except exceptions.UnsupportedBehavior as e:
+            if e.args[0] == 'chef':
+                # We pass it, cause a lot of roles has chef behavior without chef installed on them
+                continue
+            __node__['messaging'].send(
+                'RuntimeError',
+                body={
+                    'code': 'UnsupportedBehavior',
+                    'message': str(e)
+                }
+            )
+            raise sys.exc_info()[0], sys.exc_info()[1], sys.exc_info()[2]
+
+
+def fail_init():
+    '''
+    raises OperationResult that will mark server as Failed in Scalr
+    '''
+    op = operation.Operation('system.init', lambda op: None)
+    op._failed()
+    __node__['messaging'].send('OperationResult', body=op.serialize())    

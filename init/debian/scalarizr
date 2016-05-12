@@ -146,7 +146,7 @@ stop_server() {
 	    rm -f $PIDFILE
         fi
 
-        zomby_pids=$(ps -efww | grep 'bin/scalarizr' | awk '{ print $2 }')
+        zomby_pids=$(ps -eo pid,comm,cmd | grep 'bin/scalarizr' | grep -v 'grep' | grep -v 'szr worker' | awk '{ print $1 }')
         if [ "$zomby_pids" ]; then
             for zomby_pid in $zomby_pids; do
                 kill -9 $zomby_pid 2>/dev/null

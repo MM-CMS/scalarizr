@@ -1,18 +1,8 @@
-from __future__ import with_statement
 '''
 Created on Dec 5, 2009
 
 @author: marat
 '''
-
-from scalarizr.bus import bus
-from scalarizr.node import __node__
-
-# Core
-from scalarizr.messaging import MessageConsumer, MessagingError
-from scalarizr.messaging.p2p import P2pMessageStore, P2pMessage
-from scalarizr.config import STATE
-from scalarizr.util import wait_until, system2
 
 # Stdlibs
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
@@ -21,11 +11,17 @@ import threading
 import logging
 import sys
 import os
-import copy
 import time
 import socket
 import HTMLParser
 from copy import deepcopy
+
+# Core
+from scalarizr import linux
+from scalarizr.messaging import MessageConsumer, MessagingError
+from scalarizr.messaging.p2p.store import P2pMessageStore, P2pMessage
+from scalarizr.node import __node__
+from scalarizr.util import wait_until, parse_bool
 
 
 class P2pMessageConsumer(MessageConsumer):
@@ -38,6 +34,7 @@ class P2pMessageConsumer(MessageConsumer):
     handler_locked = False
     handler_status = 'stopped'
     handing_message_id = None
+    consumer_locked = False
 
     def __init__(self, endpoint=None, msg_handler_enabled=True):
         MessageConsumer.__init__(self)
@@ -45,13 +42,24 @@ class P2pMessageConsumer(MessageConsumer):
         self.endpoint = endpoint
 
         if msg_handler_enabled:
-            self._handler_thread = threading.Thread(name='MessageHandler', target=self.message_handler)
+            self._handler_thread = threading.Thread(name='MessageHandler',
+                target=self.message_handler)
         else:
             self._handler_thread = None
         self.message_to_ack = None
+        self.result_msg = None
         self.subhandler_exc_info = None
         self.ack_event = threading.Event()
+        self.special_case = None
         #self._not_empty = threading.Event()
+
+    def lock(self):
+        self.consumer_locked = True
+        self._logger.debug('Message consumer locked')
+
+    def unlock(self):
+        self.consumer_locked = False
+        self._logger.debug('Message consumer unlocked')
 
     def start(self):
         if self.running:
@@ -63,7 +71,7 @@ class P2pMessageConsumer(MessageConsumer):
                 self._logger.info('Building message consumer server on %s:%s', r.hostname, r.port)
                 #server_class = HTTPServer if sys.version_info >= (2,6) else _HTTPServer25
                 self._server = HTTPServer((r.hostname, r.port), self._get_request_handler_class())
-        except (BaseException, Exception), e:
+        except (BaseException, Exception) as e:
             self._logger.error("Cannot build server on port %s. %s", r.port, e)
             return
 
@@ -73,11 +81,12 @@ class P2pMessageConsumer(MessageConsumer):
             if self._handler_thread:
                 self._handler_thread.start()    # start message handler
             self._server.serve_forever()    # start http server
-        except (BaseException, Exception), e:
+        except (BaseException, Exception) as e:
             self._logger.exception(e)
 
     def _get_request_handler_class(self):
         class RequestHandler(BaseHTTPRequestHandler):
+            timeout = 10
             consumer = None
             '''
             @cvar consumer: Message consumer instance
@@ -116,6 +125,11 @@ class P2pMessageConsumer(MessageConsumer):
                 queue = os.path.basename(self.path)
                 rawmsg = self.rfile.read(int(self.headers["Content-length"]))
                 logger.debug("Received ingoing message in queue: '%s'", queue)
+                if self.consumer.consumer_locked:
+                    logger.debug('Consumer is locked, rejecting message')
+                    self.send_response(503, 'Service Unavailable')
+                    self.end_headers()
+                    return
 
                 try:
                     for f in self.consumer.filters['protocol']:
@@ -127,10 +141,10 @@ class P2pMessageConsumer(MessageConsumer):
                         except:
                             logger.debug('Caught message parsing error', exc_info=sys.exc_info())
 
-                except (BaseException, Exception), e:
-                    err = 'Message consumer protocol filter raises exception: %s' % str(e)
-                    logger.exception(err)
-                    self.send_response(201, 'Created')
+                except:
+                    logger.exception("Consumer won't accept message, cause: {}".format(sys.exc_info()[1]))
+                    self.send_response(400, 'Bad Request')
+                    self.end_headers()
                     return
 
                 try:
@@ -149,23 +163,27 @@ class P2pMessageConsumer(MessageConsumer):
                     logger.debug('Decoding message: %s', msg_copy.tojson(indent=4))
 
 
-                except (BaseException, Exception), e:
-                    err = "Cannot decode message. error: %s; raw message: %s" % (str(e), rawmsg)
+                except:
+                    err = ("Consumer won't accept message, cause it can't decode it: {}. "
+                        "The raw message is:\n{}").format(sys.exc_info()[1], rawmsg)
                     logger.exception(err)
-                    self.send_response(201, 'Created')
+                    self.send_response(400, 'Bad Request')
+                    self.end_headers()
                     return
 
 
-                logger.debug("Received message '%s' (message_id: %s, format: %s)", message.name, message.id, format)
+                logger.debug("Received message '%s' (message_id: %s, format: %s)",
+                    message.name, message.id, format)
                 #logger.info("Received ingoing message '%s' in queue %s", message.name, queue)
 
                 try:
                     store = P2pMessageStore()
                     store.put_ingoing(message, queue, self.consumer.endpoint)
                     #self.consumer._not_empty.set()
-                except (BaseException, Exception), e:
+                except (BaseException, Exception) as e:
                     logger.exception(e)
                     self.send_response(500, str(e))
+                    self.end_headers()
                     return
 
                 self.send_response(201, 'Created')
@@ -188,9 +206,13 @@ class P2pMessageConsumer(MessageConsumer):
         self._logger.debug('Shutdown message consumer %s ...', self.endpoint)
 
         self._logger.debug("Shutdown HTTP server")
-        self._server.shutdown()
-        self._server.socket.shutdown(socket.SHUT_RDWR)
-        self._server.socket.close()
+        try:
+            self._server.shutdown()
+            self._server.socket.shutdown(socket.SHUT_RDWR)
+            self._server.socket.close()
+        except:
+            self._logger.debug('caught: %s', sys.exc_info()[1])
+
         #self._server.server_close()
         self._server = None
         self._logger.debug("HTTP server terminated")
@@ -199,9 +221,10 @@ class P2pMessageConsumer(MessageConsumer):
         self.handler_locked = True
         if not force:
             t = 120
-            self._logger.debug('Waiting for message handler to complete it`s task. Timeout: %d seconds', t)
+            self._logger.debug('Waiting for message handler to complete it`s task.'
+                ' Timeout: %d seconds', t)
             wait_until(lambda: self.handler_status in ('idle', 'stopped'),
-                            timeout=t, error_text='Message consumer is busy', logger=self._logger)
+                timeout=t, error_text='Message consumer is busy', logger=self._logger)
 
         if self.handing_message_id:
             store = P2pMessageStore()
@@ -220,9 +243,10 @@ class P2pMessageConsumer(MessageConsumer):
             self.handing_message_id = message.id
             for ln in list(self.listeners):
                 ln(message, queue)
-        except (BaseException, Exception), e:
-            if message.name == 'BeforeHostUp' \
-                    and message.local_ip == __node__['private_ip']:
+        except KeyboardInterrupt:
+            pass
+        except (BaseException, Exception) as e:
+            if message.name == 'BeforeHostUp' and message.local_ip == __node__['private_ip']:
                 raise
             self._logger.exception(e)
         finally:
@@ -231,23 +255,26 @@ class P2pMessageConsumer(MessageConsumer):
             self.handler_status = 'idle'
             self.handing_message_id = None
 
-    def wait_acknowledge(self, message):
+    def handle_host_init(self, message):
         self.message_to_ack = message
-        self.return_on_ack = False
+        self.result_msg = None
+        self.special_case = 'HostInit'
         self.ack_event.clear()
         self._logger.debug('Waiting message acknowledge event: %s', message.name)
         self.ack_event.wait()
         self._logger.debug('Fired message acknowledge event: %s', message.name)
+        return self.result_msg
 
-    def wait_subhandler(self, message):
-        pl = bus.platform
+    def handle_before_host_up(self, message):
+        pl = __node__['platform']
 
         saved_access_data = pl.get_access_data()
         if saved_access_data:
             saved_access_data = dict(saved_access_data)
 
         self.message_to_ack = message
-        self.return_on_ack = True
+        self.result_msg = None
+        self.special_case = 'BeforeHostUp'
         thread = threading.Thread(name='%sHandler' % message.name, target=self.message_handler)
         self._logger.debug('Starting message subhandler thread: %s', thread.getName())
         thread.start()
@@ -262,8 +289,9 @@ class P2pMessageConsumer(MessageConsumer):
 
         if saved_access_data:
             pl.set_access_data(saved_access_data)
+        return self.result_msg
 
-    def message_handler (self):
+    def message_handler(self):
         store = P2pMessageStore()
         self.handler_status = 'idle'
 
@@ -286,9 +314,16 @@ class P2pMessageConsumer(MessageConsumer):
 
                                 self._logger.debug('Completed handle_one_message. Thread: %s', threading.currentThread().getName())
                                 self.message_to_ack = None
+                                self.result_msg = message
                                 self.ack_event.set()
-                                if self.return_on_ack:
+                                if self.special_case == 'HostInit' and \
+                                    parse_bool(self.result_msg.body.get('base', {}).get('reboot_after_hostinit_phase')):
+                                    self._logger.debug('Hostinit case and reboot_after_hostinit_phase. Interrupting message handler')
                                     return
+                                if self.special_case == 'BeforeHostUp':
+                                    self._logger.debug('BeforeHostUp case. Interrupting message handler')
+                                    return
+                                self._logger.debug('Found a message and continue message handler')
                                 break
                         time.sleep(0.1)
                         continue
@@ -296,7 +331,7 @@ class P2pMessageConsumer(MessageConsumer):
                     for queue, message in store.get_unhandled(self.endpoint):
                         self._handle_one_message(message, queue, store)
 
-                except (BaseException, Exception), e:
+                except (BaseException, Exception) as e:
                     self._logger.exception(e)
             time.sleep(0.1)
 

@@ -10,13 +10,11 @@ import logging
 
 from scalarizr.bus import bus
 from scalarizr import storage2, linux
-from scalarizr import config
 from scalarizr import handlers
 from scalarizr.node import __node__
 from scalarizr.messaging import Messages
 from scalarizr.util import wait_until
 from scalarizr.linux import mount
-from scalarizr.handlers import build_tags
 
 
 LOG = logging.getLogger(__name__)
@@ -33,42 +31,43 @@ class BlockDeviceHandler(handlers.Handler):
         self._vol_type = vol_type
         self._volumes = []
         self.on_reload()
-        
+
         bus.on(init=self.on_init, reload=self.on_reload)
         bus.define_events(
             # Fires when volume is attached to instance
             # @param device: device name, ex: /dev/sdf
-            "block_device_attached", 
-            
+            "block_device_attached",
+
             # Fires when volume is detached from instance
-            # @param device: device name, ex: /dev/sdf 
+            # @param device: device name, ex: /dev/sdf
             "block_device_detached",
-            
+
             # Fires when volume is mounted
             # @param device: device name, ex: /dev/sdf
             "block_device_mounted"
         )
-        
-        
+
+
     def on_reload(self):
         self._platform = bus.platform
         self._queryenv = bus.queryenv_service
 
     def accept(self, message, queue, **kwds):
-        return message.name in (Messages.INT_BLOCK_DEVICE_UPDATED, 
+        return message.name in (Messages.INT_BLOCK_DEVICE_UPDATED,
                 Messages.MOUNTPOINTS_RECONFIGURE)
 
     def on_init(self):
         bus.on(
-            before_host_init=self.on_before_host_init,
             host_init_response=self.on_host_init_response,
-            before_host_up=self.on_before_host_up
+            before_host_up=self.on_before_host_up,
+            block_device_mounted=self.on_block_device_mounted
         )
 
         try:
             handlers.script_executor.skip_events.add(Messages.INT_BLOCK_DEVICE_UPDATED)
         except AttributeError:
             pass
+        self.add_udev_rules()
         if __node__['state'] == 'running':
             volumes = self._queryenv.list_farm_role_params(__node__['farm_role_id']).get('params', {}).get('volumes', [])
             volumes = volumes or []  # Cast to list
@@ -80,19 +79,16 @@ class BlockDeviceHandler(handlers.Handler):
                     # It may be because of missing cloud credentials, we shouldn't stop initialization
                     LOG.warn("Can't ensure volume {0}. Error: {1}".format(dict(vol), sys.exc_info()[1]))
 
-    def on_before_host_init(self, *args, **kwargs):
+
+    def add_udev_rules(self):
         if linux.os.windows_family:
             return
-        LOG.debug("Adding udev rule for EBS devices")
+        LOG.debug("Ensure udev rule for EBS devices")
         try:
-            cnf = bus.cnf
-            scripts_path = cnf.rawini.get(config.SECT_GENERAL, config.OPT_SCRIPTS_PATH)
-            if scripts_path[0] != "/":
-                scripts_path = os.path.join(bus.base_path, scripts_path)
-            f = open("/etc/udev/rules.d/84-ebs.rules", "w+")
-            f.write('KERNEL=="sd*", ACTION=="add|remove", RUN+="'+ scripts_path + '/udev"\n')
-            f.write('KERNEL=="xvd*", ACTION=="add|remove", RUN+="'+ scripts_path + '/udev"')
-            f.close()
+            script_path = os.path.join(__node__['scripts_dir'], 'udev')
+            with open("/etc/udev/rules.d/84-ebs.rules", "w+") as fp:
+                fp.write('KERNEL=="sd*", ACTION=="add|remove", RUN+="' + script_path + '"\n')
+                fp.write('KERNEL=="xvd*", ACTION=="add|remove", RUN+="' + script_path + '"')
         except (OSError, IOError), e:
             LOG.error("Cannot add udev rule into '/etc/udev/rules.d' Error: %s", str(e))
             raise
@@ -113,10 +109,20 @@ class BlockDeviceHandler(handlers.Handler):
             hostup.body['volumes'] = self._volumes
 
 
+    def on_block_device_mounted(self, volume):
+        self.send_message(Messages.BLOCK_DEVICE_MOUNTED, {
+            'device_name': volume.device,
+            'volume_id': volume.id,
+            'mountpoint': volume.mpoint
+            })
+
+
     def _plug_new_style_volumes(self, volumes):
-        for vol in volumes:
+        # ec2_ephemerals should be processed before ebses
+        key_fun = lambda x: 0 if x.get('type') == "ec2_ephemeral" else 1
+        for vol in sorted(volumes, key=key_fun):
             vol = storage2.volume(**vol)
-            vol.tags.update(build_tags())
+            #vol.tags.update(build_tags()) # [UI-343]
             self._log_ensure_volume(vol)
             vol.ensure(mount=bool(vol.mpoint), mkfs=True)
             self._volumes.append(dict(vol))
@@ -138,7 +144,7 @@ class BlockDeviceHandler(handlers.Handler):
 
         common_actions = {
             'mkfs': 'make {0} filesystem',
-            'mount': 'mount to {0}'        
+            'mount': 'mount to {0}'
         }
         persistent_actions = {
             'take': 'take {0}',
@@ -156,16 +162,16 @@ class BlockDeviceHandler(handlers.Handler):
         acts = []
         if vol.id:
             if is_raid:
-                act = raid_actions['take'].format(vol.id, 
-                        len(vol.disks), 
-                        vol.disks[0].type, 
+                act = raid_actions['take'].format(vol.id,
+                        len(vol.disks),
+                        vol.disks[0].type,
                         ', '.join(str(disk.id) for disk in vol.disks))
             else:
                 act = persistent_actions['take'].format(vol.id)
             acts.append(act)
         elif vol.snap:
             if is_raid:
-                act = raid_actions['snap'].format(len(vol.disks), vol.snap['disks'][0]['type'], 
+                act = raid_actions['snap'].format(len(vol.disks), vol.snap['disks'][0]['type'],
                         ', '.join(snap['id'] for snap in vol.snap['disks']))
             else:
                 act = persistent_actions['snap'].format(vol.snap['id'])
@@ -212,10 +218,10 @@ class BlockDeviceHandler(handlers.Handler):
             qe_volume = qe_mpoint.volumes[0]
             mpoint = qe_mpoint.dir or None
             assert qe_volume.volume_id, 'Invalid volume info %s. volume_id should be non-empty' % qe_volume
-            
+
             vol = storage2.volume(
-                type=self._vol_type, 
-                id=qe_volume.volume_id, 
+                type=self._vol_type,
+                id=qe_volume.volume_id,
                 name=qe_volume.device,
                 mpoint=mpoint
             )
@@ -226,7 +232,7 @@ class BlockDeviceHandler(handlers.Handler):
 
                 vol.ensure(mount=True, mkfs=True, fstab=True)
 
-            vol._create_tags_async(qe_volume.volume_id, build_tags())  # [SCALARIZR-1012]
+            # vol._create_tags_async(qe_volume.volume_id, build_tags())  # [SCALARIZR-1012] upd [UI-343]
 
         except:
             LOG.exception("Can't attach volume")
@@ -246,29 +252,29 @@ class BlockDeviceHandler(handlers.Handler):
     def on_IntBlockDeviceUpdated(self, message):
         if not message.devname:
             return
-        
+
         if message.action == "add":
             LOG.debug("udev notified me that block device %s was attached", message.devname)
-            
+
             self.send_message(
-                Messages.BLOCK_DEVICE_ATTACHED, 
-                {"device_name" : self.get_devname(message.devname)}, 
+                Messages.BLOCK_DEVICE_ATTACHED,
+                {"device_name" : self.get_devname(message.devname)},
                 broadcast=True
             )
-            
+
             bus.fire("block_device_attached", device=message.devname)
-            
+
         elif message.action == "remove":
             LOG.debug("udev notified me that block device %s was detached", message.devname)
             fstab = mount.fstab()
             fstab.remove(message.devname)
-            
+
             self.send_message(
-                Messages.BLOCK_DEVICE_DETACHED, 
-                {"device_name" : self.get_devname(message.devname)}, 
+                Messages.BLOCK_DEVICE_DETACHED,
+                {"device_name" : self.get_devname(message.devname)},
                 broadcast=True
             )
-            
+
             bus.fire("block_device_detached", device=message.devname)
 
 

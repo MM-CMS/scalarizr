@@ -19,7 +19,7 @@ from scalarizr.config import BuiltinBehaviours
 from scalarizr.util import initdv2, system2, PopenError, software, Singleton
 from scalarizr.linux.coreutils import chown_r
 from scalarizr.services import BaseService, BaseConfig, lazy, PresetProvider, backup
-from scalarizr.node import __node__, private_dir
+from scalarizr.node import __node__
 from scalarizr import storage2
 from scalarizr import linux
 
@@ -64,7 +64,7 @@ class PgSQLInitScript(initdv2.ParametrizedInitScript):
         initd_script = None
         if linux.os.debian_family:
             initd_script = ('/usr/sbin/service', 'postgresql')
-        elif "centos" in linux.os['name'].lower() and linux.os["release"].version[0] == 7:
+        elif linux.os.redhat_family and linux.os["release"].version[0] == 7:
             initd_script = ('/sbin/service', 'postgresql-9.3')
         else:
             initd_script = firstmatched(os.path.exists, (
@@ -117,7 +117,8 @@ class PostgreSql(BaseService):
     def __init__(self):
         self._objects = {}
         self.service = initdv2.lookup(SERVICE_NAME)
-        self.pg_keys_dir = os.path.join(private_dir, 'keys')
+        self.pg_keys_dir = os.path.join(__node__['private_dir'], 'keys')
+        self.first_start = None
 
 
     @property
@@ -164,6 +165,7 @@ class PostgreSql(BaseService):
             #in case master was rebundled with trigger enabled
             os.remove(trigger_path)
         self.recovery_conf.trigger_file = trigger_path
+        os.chmod(self.recovery_conf.path, 0666)  # fix SCALARIZR-1938
         
         self.change_primary(primary_ip, primary_port, self.root_user.name)
         self.service.start()
@@ -243,7 +245,8 @@ class PostgreSql(BaseService):
         self.root_user = self.create_linux_user(ROOT_USER, password)
         self.master_user = self.create_linux_user(MASTER_USER, password)
         
-        move_files = not self.cluster_dir.is_initialized(mpoint)
+        self.first_start = move_files = not self.cluster_dir.is_initialized(mpoint)
+        LOG.debug("Master node is being initialized for the first time: %s" % self.first_start)
         self.postgresql_conf.data_directory = self.cluster_dir.move_to(mpoint, move_files)
         self.postgresql_conf.listen_addresses = '*'
         self.postgresql_conf.wal_level = 'hot_standby'
@@ -262,7 +265,7 @@ class PostgreSql(BaseService):
         if linux.os.redhat_family:
             LOG.debug("Config dir before moving: %s" % self.postgresql_conf.path)
             self.config_dir.move_to(self.unified_etc_path)
-            centos7 = "centos" in linux.os['name'].lower() and linux.os["release"].version[0] == 7
+            centos7 = linux.os.redhat_family and linux.os["release"].version[0] == 7
             if not centos7:
                 make_symlinks(os.path.join(mpoint, STORAGE_DATA_DIR), self.unified_etc_path)
             self.postgresql_conf = PostgresqlConf.find(self.config_dir)
@@ -622,12 +625,9 @@ class PSQL(object):
 class ClusterDir(object):
     #TODO: Rethink ClusterDir and ConfigDir
     try:
-        if 'Amazon' == linux.os['name'] and software.postgresql_software_info().version[:2] == (9,2):
-            base_path = '/var/lib/pgsql9/'
-        else:
-            base_path = glob.glob('/var/lib/p*sql/9.*/')[0]
+        base_path = glob.glob('/var/lib/p*sql/9.*/')[0]
         default_path = os.path.join(base_path, 'main' if linux.os.debian_family else 'data')
-    except (IndexError, software.SoftwareError):
+    except IndexError:
         base_path = None
         default_path = None
     
@@ -687,8 +687,10 @@ class ConfigDir(object):
     
     @classmethod
     def get_sysconf_path(cls):
-        if 'Amazon' == linux.os['name'] and "9.2" == cls.version:
-            path = '/etc/sysconfig/pgsql/postgresql'
+        pg_initscripts = glob.glob("/etc/init.d/postgresql*")
+        if pg_initscripts:
+            fname = os.path.basename(pg_initscripts[0])
+            path = os.path.join('/etc/sysconfig/pgsql/', fname)
         else:
             path = '/etc/sysconfig/pgsql/postgresql-%s' % cls.version or '9.0'
         return path
@@ -703,15 +705,13 @@ class ConfigDir(object):
     @classmethod
     def find(cls, version=None):
         cls.version = version or '9.0'
-        if "centos" in linux.os['name'].lower() and linux.os["release"].version[0] == 7:
+        if linux.os.redhat_family and linux.os["release"].version[0] == 7:
             path = cls._systemd_get_pgdata()
         else:
             path = cls.get_sysconfig_pgdata()
         if not path:
             if linux.os.debian_family:
                 path = '/etc/postgresql/%s/main' % version
-            elif 'Amazon' == linux.os['name'] and "9.2" == version:
-                path = '/var/lib/pgsql9/data'
             else:
                 path = os.path.join(glob.glob('/var/lib/p*sql/9.*/')[0], 'data')
         return cls(path, version)
@@ -719,7 +719,7 @@ class ConfigDir(object):
     
     def move_to(self, dst):
         datadir = os.path.join(__postgresql__['storage_dir'], STORAGE_DATA_DIR)
-        centos7 = "centos" in linux.os['name'].lower() and linux.os["release"].version[0] == 7
+        centos7 = linux.os.redhat_family and linux.os["release"].version[0] == 7
 
         if not os.path.exists(dst):
             LOG.debug("creating %s" % dst)

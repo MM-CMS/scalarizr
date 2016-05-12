@@ -9,6 +9,7 @@ import threading
 from time import sleep
 
 import novaclient.exceptions as nova_exc
+import cinderclient.exceptions as cinder_exc
 
 from scalarizr import node
 from scalarizr import storage2
@@ -129,7 +130,10 @@ class CinderVolume(base.Volume):
         if self._cinder:
             volume = None
             if self.id:
-                volume = self._cinder.volumes.get(self.id)
+                try:
+                    volume = self._cinder.volumes.get(self.id)
+                except cinder_exc.NotFound:
+                    raise storage2.VolumeNotExistsError(self.id)
 
                 if volume.availability_zone != self.avail_zone:
                     LOG.warn('Cinder volume %s is in the different '
@@ -149,11 +153,11 @@ class CinderVolume(base.Volume):
                 #     self.tags = self.snap.get('tags', {})
 
             if not self.id:
-
-                volume = self._create_volume(size=self.size,
-                                             snapshot_id=self.snapshot_id,
-                                             avail_zone=self.avail_zone,
-                                             volume_type=self.volume_type)
+                volume = self._create_volume(
+                    size=self.size,
+                    snapshot_id=self.snapshot_id,
+                    avail_zone=self.avail_zone,
+                    volume_type=self.volume_type)
                 self.size = volume.size
                 self.id = volume.id
 
@@ -182,27 +186,29 @@ class CinderVolume(base.Volume):
                        size=None,
                        name=None,
                        snapshot_id=None,
-                       display_description=None,
+                       description=None,
                        user_id=None,
                        project_id=None,
                        avail_zone=None,
                        imageRef=None,
                        tags=None,
-                       volume_type=None):
+                       volume_type=None,
+                       **kwds):
         LOG.debug('Creating Cinder volume (zone: %s size: %s snapshot: %s '
                   'volume_type: %s)', avail_zone, size,
                   snapshot_id, volume_type)
-        volume = self._cinder.volumes.create(size=size,
-                                             display_name=name,
-                                             snapshot_id=snapshot_id,
-                                             display_description=
-                                             display_description,
-                                             user_id=user_id,
-                                             project_id=project_id,
-                                             availability_zone=avail_zone,
-                                             imageRef=imageRef,
-                                             metadata=tags,
-                                             volume_type=volume_type)
+        volume = self._cinder.volumes.create(
+            size=size,
+            name=name,
+            snapshot_id=snapshot_id,
+            description=description,
+            user_id=user_id,
+            project_id=project_id,
+            availability_zone=avail_zone,
+            imageRef=imageRef,
+            metadata=tags,
+            volume_type=volume_type,
+            **kwds)
         LOG.debug('Cinder volume %s created', volume.id)
         LOG.debug('Checking that Cinder volume %s is available', volume.id)
         self._wait_status_transition(volume.id)
@@ -217,7 +223,7 @@ class CinderVolume(base.Volume):
         coreutils.sync()
         snapshot = self._cinder.volume_snapshots.create(volume_id,
                                                         force=True,
-                                                        display_description=description)
+                                                        description=description)
         LOG.debug('Snapshot %s created for Cinder volume %s',
                   snapshot.id, volume_id)
         if not nowait:
@@ -230,7 +236,7 @@ class CinderVolume(base.Volume):
         return storage2.snapshot(
             type='cinder',
             id=snapshot.id,
-            description=snapshot.display_description,
+            description=description,
             tags=tags)
 
 
@@ -249,7 +255,7 @@ class CinderVolume(base.Volume):
                 LOG.debug('Attaching Cinder volume %s', volume_id)
                 taken_before = base.taken_devices()
                 try:
-                    attachment = self._nova.volumes.create_server_volume(server_id, volume_id, None)
+                    attachment = self._nova.volumes.create_server_volume(server_id, volume_id)
                 except TypeError, e:
                     if "'NoneType' object has no attribute '__getitem__'" not in str(e):
                         # Very often (2/5 times) we got this error on RaxNG, because of incorrect API response
@@ -259,7 +265,7 @@ class CinderVolume(base.Volume):
                 LOG.debug('Checking that Cinder volume %s is attached', volume_id)
                 new_status = self._wait_status_transition(volume_id)
                 if new_status == 'in-use':
-                    LOG.debug('Cinder volume %s attached', volume_id)
+                    LOG.debug('Cinder volume %s attached, device: %s', volume_id, attachment.device)
                     break
                 elif new_status == 'available':
                     LOG.warn('Volume %s status changed to "available" instead of "in-use"', volume_id)
@@ -271,18 +277,7 @@ class CinderVolume(base.Volume):
                     raise storage2.StorageError(msg)
 
             if not linux.os.windows_family:
-                util.wait_until(lambda: base.taken_devices() > taken_before,
-                        start_text='Checking that volume %s is available in OS' % volume_id,
-                        timeout=30,
-                        sleep=1,
-                        error_text='Volume %s attached but not available in OS' % volume_id)
-
-                devices = list(base.taken_devices() - taken_before)
-                if len(devices) > 1:
-                    msg = "While polling for attached device, got multiple new devices: %s. " \
-                        "Don't know which one to select".format(devices)
-                    raise Exception(msg)
-                return devices[0]
+                return base.wait_device_plugged(volume_id, taken_before)
             else:
                 return attachment.device
 

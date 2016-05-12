@@ -1,5 +1,3 @@
-from __future__ import with_statement
-
 
 def build_linux_args(short=None, long=None):
     short = short or []

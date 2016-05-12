@@ -33,7 +33,7 @@ class UnknownCommand(SystemExit):
     def __int__(self):
         """Exit code"""
         return 1
-    
+
     def __init__(self, message, command_name=None, usage=None):
         super(UnknownCommand, self).__init__(message)
         self.command_name = command_name
@@ -48,7 +48,7 @@ class InvalidCall(SystemExit):
     def __int__(self):
         """Exit code"""
         return 2
-    
+
     def __init__(self, message, command_name=None, usage=None):
         super(InvalidCall, self).__init__(message)
         self.command_name = command_name
@@ -60,7 +60,7 @@ class CommandError(SystemExit):
     This exception is thrown when some command-specific runtime error is occured.
     Such as unknown message id in message-details or similiar
     """
-    
+
     def __int__(self):
         """Exit code"""
         return 3
@@ -77,7 +77,7 @@ class Command(object):
     Command can have aliases - list of strings.
     run_subcommand() searches among names and aliases to find given subcommand.
     Commands return value is exit code return by Szradm if no exception is thrown.
-    If one of exception standard exceptions is thrown, return code is taken 
+    If one of exception standard exceptions is thrown, return code is taken
         from their int() value.
 
     """
@@ -161,7 +161,7 @@ class Command(object):
                 kwds['self'] = self
         try:
             kwds.update(parse_command_line(args, sub_cmd_doc, options_first=options_first))
-        except (DocoptExit, DocoptLanguageError), e:
+        except (DocoptExit, DocoptLanguageError):
             # TODO: think about showing whole help not just usage
             usage = printable_usage(sub_cmd_doc)
             msg = '%s: invalid call.' % subcommand
@@ -173,7 +173,7 @@ class Command(object):
             kwds['help'] = kwds.pop('h')
 
         if 'help' in kwds and not accepts_help:
-            print sub_cmd_doc
+            print(sub_cmd_doc)
         else:
             return sub_cmd(**kwds)
 
@@ -200,7 +200,7 @@ def _docopt_out_to_kwds(arguments):
     Renaming arguments from command-line-like to python-like.
     """
     result = {}
-    for k, v in arguments.items():
+    for k, v in list(arguments.items()):
         if v:
             new_k = k.lstrip('-').replace('-', '_')
             new_k = new_k.replace('<', '').replace('>', '')
@@ -210,7 +210,7 @@ def _docopt_out_to_kwds(arguments):
 
 def get_command_name(obj):
     """
-    Returns command name from given class or class name. 
+    Returns command name from given class or class name.
     (cls or func or str) -> str
     """
     name = obj

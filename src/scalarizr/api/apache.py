@@ -2,17 +2,13 @@
 .. module:: apache
    :platform: Linux
    :synopsis: Set of API methods for managing Apache VirtualHosts
-
 .. moduleauthor:: Dmytro Korsakov <dmitry@scalr.com>
-
-
 """
 
 from __future__ import with_statement
 
 import os
 import re
-import sys
 import pwd
 import time
 import uuid
@@ -117,7 +113,7 @@ else:
         }
         """})
 
-    if linux.os.redhat_family and linux.os["release"] >= (7, 0):
+    if linux.os.redhat_family and linux.os["release"].version[0] == 7:
         initd_script = {"initd_script": ("/sbin/service", "httpd")}
     else:
         initd_script = {"initd_script": "/etc/init.d/httpd"}
@@ -137,9 +133,7 @@ class ApacheAPI(BehaviorAPI):
 
     """
     Basic API for configuring Apache VirtualHosts, querying statistics and controlling service status.
-
     Namespace::
-
         apache
     """
 
@@ -171,45 +165,30 @@ class ApacheAPI(BehaviorAPI):
     def create_vhost(self, hostname, port, template, ssl, ssl_certificate_id=None, reload=True, allow_port=False):
         """
         Creates a Name-Based Apache VirtualHost.
-
         :param hostname: Server Name
         :type hostname: str
-
         :param port: Port number VirtualHost should listen to
         :type port: int
-
         :param template: VirtualHost body with no certificate paths
         :type template: str
-
         :param ssl: True if VirtualHost uses SSL certificate
         :type ssl: bool
-
         :param ssl_certificate_id: ID of SSL certificate
         :type ssl_certificate_id: int
-
         :param reload: True if immediate apache reload is required.
         :type reload: bool
-
         :returns: Path to VirtualHost file.
         :rtype: str
-
         Examples:
-
         Configure VirtualHost "www.dima.com" on port 80 without SSL enabled and reload Apache2 service::
-
             >>> api.apache.create_vhost("www.dima.com", 80, "<template>", False)
             "/etc/scalr/private.d/vhosts/www.dima.com-80.vhost.conf"
-
         ADD VirtualHost "secure.dima.com" on port 443 with SSL enabled, reload Apache2 and allow port 443 in IPTables::
-
             >>> api.apache.create_vhost("secure.dima.com", 443, "<template>", False)
             "/etc/scalr/private.d/vhosts/secure.dima.com-443.vhost.conf"
-
         Configure VirtualHost "old.dima.com" on port 8080 without SSL enabled and without reloading Apache2 service::
-
             >>> api.apache.create_vhost("old.dima.com", 8080, "<template>", reload=False)
             "/etc/scalr/private.d/vhosts/www.dima.com-80.vhost.conf"
-
         Please Note that VirtualHosts on custom ports feature requires testing.
         """
         # TODO: add Listen and NameVirtualHost directives to httpd.conf or ports.conf if needed
@@ -331,42 +310,27 @@ class ApacheAPI(BehaviorAPI):
             reload=True):
         """
         Changes settings of an existing VirtualHost. VirtualHost is defined by VH signature.
-
         :param signature: Hostname and Port to identidy VirtualHost for modifying.
         :type signature: tuple
-
         :param hostname: New hostname.
         :type hostname: str
-
         :param port: New port.
         :type port: int
-
         :param ssl: Indicates if the updated VirtualHost is going to be ssl-based.
         :type ssl: bool
-
         :param ssl_certificate_id: ID of the new certificate to fetch from Scalr.
         :type ssl_certificate_id: int
-
         :param reload: Indicates if immediate reload is required.
         :type reload: bool
-
         :param template: New template. If new template is passed,
-
             all other changes (e.g. hostname, port, cert) will be applied to it.
-
             Otherwise changes will be applied to old VirtualHost`s body.
         :type template: str
-
         Example:
-
         Change ServerName to old.dima.com, switch port to 8080 and reload service::
-
             api.apache.update_vhost(("www.dima.com", 80), "old.dima.com", 8080)
-
         .. warning::
-
             Scalr does not use update_vhost API method so it has not been tested properly yet.
-
         """
 
         old_hostname, old_port = signature
@@ -411,18 +375,13 @@ class ApacheAPI(BehaviorAPI):
     def delete_vhosts(self, vhosts, reload=True):
         """
         Removes a set of VirtualHosts from Apache2 configuration.
-
         :param vhosts: [(hostname,password),]
         :type vhosts: list
-
         :param reload: Indicates if immediate service reload is reqired.
         :type reload: bool
-
         Example:
         Remove 2 VirtualHosts from Apache2 configuration without removing website content, and reload service::
-
             api.apache.delete_vhosts([("www.dima.com", 80), ("old.dima.com", 8080)])
-
         """
         LOG.info("Removing Apache VirtualHosts: %s" % str(vhosts))
 
@@ -505,16 +464,12 @@ class ApacheAPI(BehaviorAPI):
         """
         Resets current Scalr-managed VirtualHost configuration and deploys a new set of VirtualHosts.
         :param vhosts: list(dict(hostname:hostname1,port:port1,template:tpl1,..),..)
-
         :return: paths to reconfigured VirtualHosts
         :rtype: list
-
         Example:
         Change Apache2 configuration to single VirtualHost www.dima.com:80 and reload Apache service::
-
             vhost1 = dict(hostname="www.dima.com", port=80, template="<tpl1>", ssl=False)
             api.apache.reconfigure([vhost1,])
-
         """
         return self._op_api.run('api.apache.reconfigure',
                                 func=self.do_reconfigure,
@@ -528,7 +483,6 @@ class ApacheAPI(BehaviorAPI):
     def get_webserver_statistics(self):
         """
         Returns mod_stat data
-
         i.e.
         Current Time,
         Restart Time,
@@ -536,18 +490,12 @@ class ApacheAPI(BehaviorAPI):
         Server uptime,
         Total accesses,
         CPU Usage.
-
         Data are read from machine readable file which can be accessed by the following link:
-
         http://server.name/server-status?auto
-
         Data are available only when mod_stat is enabled.
-
         :return: Parsed mod_status data
         :rtype: dict
-
         Example::
-
             api.apache.get_webserver_statistics()
                 {u'BusyWorkers': u'1',
                  u'BytesPerReq': u'204.8',
@@ -559,7 +507,6 @@ class ApacheAPI(BehaviorAPI):
                  u'Total Accesses': u'10',
                  u'Total kBytes': u'2',
                  u'Uptime': u'91981'}
-
         """
         d = dict()
         try:
@@ -586,15 +533,11 @@ class ApacheAPI(BehaviorAPI):
         """
         Returns all VirtualHosts deployed by Scalr
         and available on web server.
-
         :return: Paths to available VirtualHosts
         :rtype: list
-
         Example::
-
             >>> api.apache.list_served_virtual_hosts()
             ["/etc/scalr/private.d/vhosts/www.dima.com-80.vhost.conf"]
-
         """
         text = system2((__apache__["apachectl"], "-S"))[0]
         directory = __apache__["vhosts_dir"]
@@ -614,15 +557,11 @@ class ApacheAPI(BehaviorAPI):
         If the certificate with given ID already exists on disk
         this method adds it to the default SSL virtual host.
         Otherwise default system certificate will be used.
-
         :param id: SSL Certificate ID
         :type id: int
-
         Example:
         Set Scalr Certificate ID#873 as default::
-
             api.apache.set_default_ssl_certificate("873")
-
         """
         cert = SSLCertificate(id)
         self.mod_ssl.set_default_certificate(cert)
@@ -631,9 +570,7 @@ class ApacheAPI(BehaviorAPI):
     def start_service(self):
         """
         Starts Apache service.
-
         Example::
-
             api.apache.start_service()
         """
         self.service.start()
@@ -642,12 +579,9 @@ class ApacheAPI(BehaviorAPI):
     def stop_service(self, reason=None):
         """
         Stops Apache service.
-
         :param reason: Message to appear in log before service is stopped.
         :type reason: str
-
         Example::
-
             api.apache.stop_service("Configuring Apache2 service.")
         """
         self.service.stop(reason)
@@ -656,12 +590,9 @@ class ApacheAPI(BehaviorAPI):
     def restart_service(self, reason=None):
         """
         Restarts Apache service.
-
         :param reason: Message to appear in log before service is restarted.
         :type reason: str
-
         Example::
-
             api.apache.restart_service("Applying new service configuration preset.")
         """
         self.service.restart(reason)
@@ -670,12 +601,9 @@ class ApacheAPI(BehaviorAPI):
     def reload_service(self, reason=None):
         """
         Reloads Apache configuration.
-
         :param reason: Message to appear in log before service is reloaded.
         :type reason: str
-
         Example::
-
             api.apache.reload_service("Applying RPAF proxy list.")
         """
         try:
@@ -692,13 +620,11 @@ class ApacheAPI(BehaviorAPI):
     def get_service_status(self):
         """
         Checks Apache service status.
-
         RUNNING = 0
         DEAD_PID_FILE_EXISTS = 1
         DEAD_VAR_LOCK_EXISTS = 2
         NOT_RUNNING = 3
         UNKNOWN = 4
-
         :return: Status num.
         :rtype: int
         """
@@ -708,9 +634,7 @@ class ApacheAPI(BehaviorAPI):
     def configtest(self):
         """
         Performs Apache configtest.
-
         Example::
-
             api.apache.configtest()
         """
         self.service.configtest()
@@ -1374,7 +1298,7 @@ class RedHatBasedModSSL(ModSSL):
                     LOG.debug("NameVirtualHost directive not found in %s", ssl_conf_path)
                     if not ssl_conf.get_list("Listen"):
                         LOG.info("Listen directive not found in %s. ", ssl_conf_path)
-                        LOG.info("Patching %s with Listen & NameVirtualHost directives.",     ssl_conf_path)
+                        LOG.info("Patching %s with Listen & NameVirtualHost directives.", ssl_conf_path)
                         ssl_conf.add("Listen", str(ssl_port))
                         ssl_conf.add("NameVirtualHost", "*:%s" % ssl_port)
                     else:
@@ -1408,7 +1332,7 @@ class ApacheInitScript(initdv2.ParametrizedInitScript):
         if linux.os.redhat_family:
             if linux.os["name"] == 'Amazon' or linux.os["release"].version[0] == 6:
                 pid_file = "/var/run/httpd/httpd.pid"
-            elif "centos" in linux.os['name'].lower() and linux.os["release"].version[0] == 7:
+            elif linux.os.redhat_family and linux.os["release"].version[0] == 7:
                 pid_file = "/var/run/httpd/httpd.pid"
             else:
                 pid_file = "/var/run/httpd.pid"

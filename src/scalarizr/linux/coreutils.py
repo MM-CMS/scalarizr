@@ -136,7 +136,7 @@ def mkdir(path, mode=0777):
 
 def blkid(device_path, **kwargs):
     if not os.path.exists(device_path):
-        raise Exception("Device %s doesn't exist")
+        raise Exception("Device {} doesn't exist".format(device_path))
 
     ret = dict()
 
@@ -269,4 +269,10 @@ def lsscsi():
         }
     return ret
 
-
+def is_binary(path):
+    with open(path, 'rb') as fp:
+        bts = fp.read(1024)
+    if bts:
+        textchars = bytearray([7,8,9,10,12,13,27]) + bytearray(range(0x20, 0x100))
+        return bool(bts.translate(None, textchars))
+    return False

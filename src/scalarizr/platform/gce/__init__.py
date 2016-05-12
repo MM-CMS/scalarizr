@@ -9,23 +9,19 @@ import httplib2
 import threading
 from httplib import BadStatusLine
 
-try:
-    import json
-except ImportError:
-    import simplejson as json
+import json
 
 from oauth2client.client import SignedJwtAssertionCredentials
 from apiclient.discovery import build
 
-
 from scalarizr import node
 from scalarizr import platform
-from scalarizr.platform import NoCredentialsError, InvalidCredentialsError, ConnectionError
+from scalarizr.platform import NoCredentialsError, InvalidCredentialsError
 from scalarizr.util import LocalPool
-from scalarizr.config import BuiltinPlatforms
 
 
-COMPUTE_RW_SCOPE = ('https://www.googleapis.com/auth/compute', "https://www.googleapis.com/auth/compute.readonly")
+COMPUTE_RW_SCOPE = ('https://www.googleapis.com/auth/compute',
+    "https://www.googleapis.com/auth/compute.readonly")
 STORAGE_FULL_SCOPE = ("https://www.googleapis.com/auth/devstorage.full_control",
                       "https://www.googleapis.com/auth/devstorage.read_only",
                       "https://www.googleapis.com/auth/devstorage.read_write",
@@ -35,11 +31,12 @@ STORAGE_FULL_SCOPE = ("https://www.googleapis.com/auth/devstorage.full_control",
 LOG = logging.getLogger(__name__)
 
 
-class GoogleApiClientLoggerFilter:
+class GoogleApiClientLoggerFilter(object):
     def filter(self, record):
         if 'takes exactly' or 'takes at most' in record.message:
             return False
         return True
+
 
 api_logger = logging.getLogger('oauth2client.util')
 api_logger.addFilter(GoogleApiClientLoggerFilter())
@@ -47,6 +44,7 @@ api_logger.addFilter(GoogleApiClientLoggerFilter())
 
 def get_platform():
     return GcePlatform()
+
 
 class BadStatusLineHandler(object):
     def __init__(self, obj):
@@ -84,8 +82,6 @@ class BadStatusLineHandler(object):
                 return BadStatusLineHandler(item)
             else:
                 return item
-
-
 
 
 class GoogleServiceManager(object):
@@ -148,11 +144,11 @@ class GCEConnectionPool(LocalPool):
         self.scope = list(scope)
 
     def _create_connection(self):
-        platform = node.__node__['platform']
+        platform_obj = node.__node__['platform']
         http = httplib2.Http()
         try:
-            email = platform.get_access_data('service_account_name')
-            pk = base64.b64decode(platform.get_access_data('key'))
+            email = platform_obj.get_access_data('service_account_name')
+            pk = base64.b64decode(platform_obj.get_access_data('key'))
         except platform.PlatformError:
             raise NoCredentialsError(sys.exc_info()[1])
         try:
@@ -173,32 +169,14 @@ class GcePlatform(platform.Platform):
 
     metadata_url = 'http://metadata/computeMetadata/v1/'
     _metadata = None
-    name = BuiltinPlatforms.GCE
+    name = 'gce'
 
     def __init__(self):
         platform.Platform.__init__(self)
-        self.compute_svc_mgr = GoogleServiceManager(
-                self, 'compute', self.compute_api_version, *(COMPUTE_RW_SCOPE + STORAGE_FULL_SCOPE))
-        self.storage_svs_mgr = GoogleServiceManager(
-                self, 'storage', self.storage_api_version, *STORAGE_FULL_SCOPE)
         self._compute_conn_pool = GCEConnectionPool(
                 'compute', 'v1', COMPUTE_RW_SCOPE + STORAGE_FULL_SCOPE)
         self._storage_conn_pool = GCEConnectionPool(
                 'storage', 'v1', STORAGE_FULL_SCOPE)
-
-    def get_user_data(self, key=None):
-        if self._userdata is None:
-            try:
-                raw_userdata = self._get_metadata('instance/attributes/scalr').strip()
-                self._userdata = self._parse_user_data(raw_userdata)
-            except urllib2.HTTPError, e:
-                if 404 == e.code:
-                    self._userdata = dict()
-                else:
-                    raise
-
-        return self._userdata.get(key) if key else self._userdata
-
 
     def _get_metadata(self, key, url=None):
         if url is None:
@@ -262,12 +240,3 @@ class GcePlatform(platform.Platform):
 
     def get_storage_conn(self):
         return GCEConnectionProxy(self._storage_conn_pool)
-
-
-    def new_compute_client(self):
-        return self.compute_svc_mgr.get_service()
-
-
-    def new_storage_client(self):
-        return self.storage_svs_mgr.get_service()
-

@@ -6,7 +6,6 @@ from scalarizr import rpc
 from scalarizr import linux
 from scalarizr.linux import pkgmgr
 from scalarizr.util import Singleton, initdv2
-from scalarizr import exceptions
 from scalarizr.api import BehaviorAPI
 from scalarizr.util import software
 
@@ -35,26 +34,26 @@ class ChefInitScript(initdv2.ParametrizedInitScript):
                 # Stop default chef-client init script
                 if os.path.exists(self._default_init_script):
                     linux.system(
-                        (self._default_init_script, "stop"), 
-                        close_fds=True, 
-                        preexec_fn=os.setsid, 
+                        (self._default_init_script, "stop"),
+                        close_fds=True,
+                        preexec_fn=os.setsid,
                         raise_exc=False
                     )
 
-                cmd = (chef_client_bin, '--daemonize', '--logfile', 
+                cmd = (chef_client_bin, '--daemonize', '--logfile',
                         '/var/log/chef-client.log', '--pid', self.pid_file)
-                out, err, rcode = linux.system(cmd, close_fds=True, 
-                            preexec_fn=os.setsid, env=self._env,
-                            stdout=open(os.devnull, 'w+'), 
-                            stderr=open(os.devnull, 'w+'), 
-                            raise_exc=False)
+                out, err, rcode = linux.system(cmd, close_fds=True,
+                                               preexec_fn=os.setsid, env=self._env,
+                                               stdout=open(os.devnull, 'w+'),
+                                               stderr=open(os.devnull, 'w+'),
+                                               raise_exc=False)
                 if rcode == 255:
                     LOG.debug('chef-client daemon already started')
                 elif rcode:
                     msg = (
-                        'Chef failed to start daemonized. '
-                        'Return code: %s\nOut:%s\nErr:%s'
-                        )
+                           'Chef failed to start daemonized. '
+                           'Return code: %s\nOut:%s\nErr:%s'
+                    )
                     raise initdv2.InitdError(msg % (rcode, out, err))
 
         elif action == "stop":
@@ -170,4 +169,3 @@ class ChefAPI(BehaviorAPI):
         #         raise Exception(msg)
         #     return (('chef', ))
         # return pkgmgr.check_software(['chef'], system_packages)[0]
-

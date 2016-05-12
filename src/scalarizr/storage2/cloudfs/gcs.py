@@ -181,7 +181,7 @@ class GCSFileSystem(CloudFileSystem):
     @property
     def cloudstorage(self):
         pl = bus.platform
-        return pl.new_storage_client()
+        return pl.get_storage_conn()
 
 
 cloudfs_types["gcs"] = GCSFileSystem

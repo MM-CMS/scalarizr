@@ -16,15 +16,15 @@ class NoFileSystem(linux.LinuxError):
     pass
 
 
-_MountEntry = collections.namedtuple('_MountEntry', 
+_MountEntry = collections.namedtuple('_MountEntry',
                 'device mpoint fstype options dump fsck_order')
 
 
 class _Mounts(object):
-    filename = '/proc/mounts'   
+    filename = '/proc/mounts'
     _entries = None
     _entry_re = None
-    
+
     def __init__(self, filename=None):
         if filename:
             self.filename = filename
@@ -43,10 +43,10 @@ class _Mounts(object):
                     self._entries.append(_MountEntry(*m))
 
     def __getitem__(self, device_or_mpoint):
-        matched = [entry for entry in self 
+        matched = [entry for entry in self
                     if self._entry_matches(entry, device_or_mpoint)]
         if matched:
-            return matched[0]       
+            return matched[0]
         raise KeyError(device_or_mpoint)
 
     def __contains__(self, device_or_mpoint):
@@ -74,7 +74,7 @@ class _Mounts(object):
     remove = __delitem__
 
     def __setitem__(self, device, entry):
-        pass    
+        pass
 
     def add(self, device, mpoint, fstype, options='auto', dump=0, fsck_order=0):
         with open(self.filename, 'a+') as fp:
@@ -92,21 +92,21 @@ class _Mounts(object):
 
 class _Fstab(_Mounts):
     filename = '/etc/fstab'
-        
+
 
 def mounts(filename=None):
     return _Mounts(filename)
 
 
 def fstab(filename=None):
-    return _Fstab(filename) 
+    return _Fstab(filename)
 
 
 def mount(device, mpoint, *short_args, **long_kwds):
     args = linux.build_cmd_args(
         executable='/bin/mount',
         short=short_args,
-        long=long_kwds, 
+        long=long_kwds,
         params=(device, mpoint)
     )
     if not os.path.exists(mpoint):
@@ -137,18 +137,18 @@ class MountError(BaseException):
     CANNOT_MOUNT = -101
     CANNOT_UMOUNT = -102
     CANNOT_CREATE_FS = -103
-    
+
     message = None
     code = None
-    
+
     def __init__(self, *args):
         BaseException.__init__(self, *args)
         self.message = args[0]
-        if(len(args) > 1):
+        if len(args) > 1:
             self.code = args[1]
-    
 
-def mount_ex(device, 
+
+def mount_ex(device,
              mpoint='/mnt',
              options=None,
              make_fs=False,
@@ -156,21 +156,21 @@ def mount_ex(device,
              auto_mount=False):
     if not os.path.exists(mpoint):
         os.makedirs(mpoint)
-    
+
     options = options or ('-t', 'auto')
-    
+
     if make_fs:
         from scalarizr import storage2
         storage2.filesystem(fstype).mkfs(device)
-    
+
     out = mount(device, mpoint, *options)[0]
-    
+
     if " ".join(options).find("loop") == -1:
-        mtab = mounts()     
+        mtab = mounts()
         if not mtab.contains(device):
             raise MountError("Cannot mount device '%s'. %s" % (device, out),
                              MountError.CANNOT_MOUNT)
-    
+
     if auto_mount:
         _fstab = fstab()
         if not _fstab.contains(device, mpoint=mpoint, reload=True):

@@ -2,6 +2,7 @@ from __future__ import with_statement
 
 import sys
 import logging
+from scalarizr import bollard
 from scalarizr import linux
 from scalarizr.api import mysql
 from scalarizr.linux import pkgmgr
@@ -57,3 +58,12 @@ class MariaDBAPI(mysql.MySQLAPI):
                 if isinstance(error, cls):
                     raise error
 
+
+@bollard.task(name='api.mariadb.reconfigure', exclusive=True)
+def reconfigure(*args, **kwds):
+    return MariaDBAPI().do_grow(*args, **kwds)
+
+
+@bollard.task(name='api.mariadb.create-backup', exclusive=True)
+def create_backup(*args, **kwds):
+    return MariaDBAPI().do_backup(*args, **kwds)

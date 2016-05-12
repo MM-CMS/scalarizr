@@ -1,12 +1,7 @@
-import sys
 from xml.dom import minidom
-try:
-    import json as json_module
-except ImportError:
-    import simplejson as json_module
+import json as json_module
 import yaml
 
-from scalarizr.bus import bus
 from scalarizr.adm.command import Command
 from scalarizr.adm.command import CommandError
 from scalarizr.adm.command import TAB_SIZE
@@ -48,7 +43,7 @@ service_to_behavior = {
 }
 
 
-class ReturnCode:
+class ReturnCode(object):
     RUNNING = 0
     STOPPED = 3
     UNKNOWN = 4
@@ -70,7 +65,7 @@ class Service(Command):
       -f <format>, --format=<format>
     """
     # TODO: add usage for mongo:
-    # service mongodb (start | stop | status) [(mongos | mongod | 
+    # service mongodb (start | stop | status) [(mongos | mongod |
     #        configsrv | configsrv-2 | configsrv-3 | arbiter)]
 
     aliases = ['s']
@@ -88,7 +83,7 @@ class Service(Command):
         try:
             print 'Starting %s' % service
             api.start_service(**kwds)
-        except (BaseException, Exception), e:
+        except (BaseException, Exception) as e:
             print 'Service start failed.\n%s' % e
             return int(CommandError())
 
@@ -100,7 +95,7 @@ class Service(Command):
         try:
             print 'Stopping %s' % service
             api.stop_service(**kwds)
-        except (BaseException, Exception), e:
+        except (BaseException, Exception) as e:
             print 'Service stop failed.\n%s' % e
             return int(CommandError())
 
@@ -169,7 +164,7 @@ class Service(Command):
             return ReturnCode.STOPPED
 
         statuses_list = []
-        for i, (port, status) in enumerate(statuses.items()):
+        for _, (port, status) in enumerate(statuses.items()):
             status_message = 'Redis process on port %s is stopped' % port
             if status == initdv2.Status.RUNNING:
                 status_message = 'Redis process on port %s is running' % port
@@ -185,7 +180,7 @@ class Service(Command):
             return ReturnCode.RUNNING
         return ReturnCode.STOPPED
 
-    def __call__(self, 
+    def __call__(self,
         service=None,
         start=False,
         stop=False,
@@ -217,11 +212,11 @@ class Service(Command):
                 port = range(_start-1, _end)
         elif mongodb:
             mongo_component = ((mongos and 'mongos') or
-                               (mongod and 'mongod') or
-                               (configsrv and 'configsrv') or
-                               (configsrv_2 and 'configsrv-2') or
-                               (configsrv_3 and 'configsrv-3') or
-                               (arbiter and 'arbiter'))
+                (mongod and 'mongod') or
+                (configsrv and 'configsrv') or
+                (configsrv_2 and 'configsrv-2') or
+                (configsrv_3 and 'configsrv-3') or
+                (arbiter and 'arbiter'))
             # TODO: finish
 
         if service not in service_apis:

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -21,13 +22,11 @@ from scalarizr.linux import mount
 from scalarizr.linux import rsync
 from scalarizr.linux import pkgmgr
 from scalarizr.node import __node__
-from scalarizr.node import base_dir as etc_dir
-from scalarizr.node import private_dir
 from scalarizr.storage2 import filesystem
 from scalarizr.storage2 import volume as create_volume
 from scalarizr.storage2.util import loop
 from scalarizr.util import system2
-
+from scalarizr.util.deploy import HttpSource
 
 LOG = logging.getLogger(__name__)
 
@@ -102,7 +101,7 @@ class InstanceStoreImageMaker(object):
             '--access-key', self.credentials['access_key'],
             '--secret-key', self.credentials['secret_key'],
             '--manifest', manifest)
-        LOG.debug('Image upload command: ', ' '.join(cmd))
+        LOG.debug('Image upload command: ' + ' '.join(cmd))
         out = linux.system(cmd, env=self.environ)[0]
         LOG.debug('Image upload command out: %s' % out)
         return bucket, manifest
@@ -405,10 +404,8 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
                 '-L', 'http://curl.haxx.se/ca/cacert.pem',
                 '-o', '/etc/pki/tls/certs/ca-bundle.crt'))
 
-        system2(('wget',
-            '-P', '/tmp',
-            'http://cache.ruby-lang.org/pub/ruby/1.9/ruby-1.9.3-p547.tar.gz'))
-        system2(('tar', '-xzvf', 'ruby-1.9.3-p547.tar.gz'), cwd='/tmp')
+        ruby_src = HttpSource('http://cache.ruby-lang.org/pub/ruby/1.9/ruby-1.9.3-p547.tar.gz')
+        ruby_src.update('/tmp')
         sources_dir = '/tmp/ruby-1.9.3-p547'
         system2(('./configure', '-prefix=%s' % self._ruby_dir), cwd=sources_dir)
         system2(('make',), cwd=sources_dir)
@@ -439,16 +436,12 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
             utils_package = 'sg3-utils_1.39-0.1_%s.deb' % arch
             pkg_mgr_cmd = 'dpkg'
         
-        system2(('wget',
-            'http://sg.danny.cz/sg/p/'+lib_package,
-            '-P',
-            '/tmp'),)
+        lib_src = HttpSource('http://sg.danny.cz/sg/p/'+lib_package)
+        lib_src.update('/tmp')
         system2((pkg_mgr_cmd, '-i', '/tmp/'+lib_package))
 
-        system2(('wget',
-            'http://sg.danny.cz/sg/p/'+utils_package,
-            '-P',
-            '/tmp'),)
+        utils_src = HttpSource('http://sg.danny.cz/sg/p/'+utils_package)
+        utils_src.update('/tmp')
         system2((pkg_mgr_cmd, '-i', '/tmp/'+utils_package))
 
         os.remove('/tmp/'+lib_package)
@@ -460,11 +453,6 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
             self.bundle_vol_cmd = '/opt/aws/bin/ec2-bundle-vol'
             return
 
-        system2(('wget',
-            'http://s3.amazonaws.com/ec2-downloads/ec2-ami-tools.zip',
-            '-P',
-            '/tmp'),)
-
         if not os.path.exists(self._tools_dir):
             if not os.path.exists(os.path.dirname(self._tools_dir)):
                 os.mkdir(os.path.dirname(self._tools_dir))
@@ -475,9 +463,8 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
         self._remove_old_versions()
         self._install_ruby()
 
-        system2(('unzip', '/tmp/ec2-ami-tools.zip', '-d', self._tools_dir))
-
-        os.remove('/tmp/ec2-ami-tools.zip')
+        ami_tools_src = HttpSource('http://s3.amazonaws.com/ec2-downloads/ec2-ami-tools.zip')
+        ami_tools_src.update(self._tools_dir)
 
         directory_contents = os.listdir(self._tools_dir)
         self.ami_bin_dir = None
@@ -502,14 +489,11 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
 
             # updating mkfs cause of filesystem option setting bug
             pkgmgr.installed('texinfo')
-            system2(('wget',
-                'https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/'
-                    'v1.42.5/e2fsprogs-1.42.5.tar.gz',
-                '-P',
-                '/tmp'),)
 
+            e2fsprogs_src = HttpSource('https://www.kernel.org/pub/linux/kernel/'
+                'people/tytso/e2fsprogs/v1.42.5/e2fsprogs-1.42.5.tar.gz')
+            e2fsprogs_src.update('/tmp')
             e2fs_dir = '/tmp/e2fsprogs-1.42.5'
-            system2(('tar', '-xzvf', 'e2fsprogs-1.42.5.tar.gz'), cwd='/tmp')
             build_dir = os.path.join(e2fs_dir, 'build')
             os.mkdir(build_dir)
             system2(('../configure'), cwd=build_dir)
@@ -538,7 +522,10 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
             vol_filters = {'attachment.instance-id': instance.id}
             attached_vols = ec2_conn.get_all_volumes(filters=vol_filters)
             for vol in attached_vols:
-                if instance.root_device_name == vol.attach_data.device:
+                # Strip ending digits to make /dev/sda1 -eq /dev/sda
+                if instance.root_device_name == vol.attach_data.device or \
+                    re.sub(r'\d+$', '', instance.root_device_name) == vol.attach_data.device:
+                    
                     return vol
             raise ImageAPIError("Failed to find root volume")
         else:
@@ -551,7 +538,7 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
 
     def _setup_environment(self):
         platform = __node__['platform']
-        cnf = ScalarizrCnf(etc_dir)
+        cnf = ScalarizrCnf(__node__['etc_dir'])
         cert, pk = platform.get_cert_pk()
         access_key, secret_key = platform.get_access_keys()
 
@@ -616,7 +603,7 @@ class EC2ImageAPIDelegate(ImageAPIDelegate):
         return image_id
 
     def finalize(self, operation, name):
-        cnf = ScalarizrCnf(etc_dir)
+        cnf = ScalarizrCnf(__node__['etc_dir'])
         for key_name in ('ec2-cert.pem', 'ec2-pk.pem', 'ec2-cloud-cert.pem'):
             path = cnf.key_path(key_name)
             linux.system('chmod 755 %s' % path, shell=True)

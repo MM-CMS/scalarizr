@@ -1,14 +1,16 @@
-from __future__ import with_statement
 
+import os
 import sys
 import urllib2
 
+from common.utils.facts import fact
+from scalarizr.node import __node__
 from scalarizr import storage2
 from scalarizr.storage2.volumes import base
 from scalarizr.storage2.volumes import ebs
 
 
-class Ec2EphemeralVolume(base.Volume):
+class Ec2EphemeralVolume(ebs.WinMountMixin, base.Volume):
 
     def __init__(self, name=None, **kwds):
         '''
@@ -23,7 +25,6 @@ class Ec2EphemeralVolume(base.Volume):
                 'detach': False
         })
 
-
     def _ensure(self):
         self._check_attr('name')
         try:
@@ -34,7 +35,14 @@ class Ec2EphemeralVolume(base.Volume):
                             self.name, sys.exc_info()[1], url)
             raise storage2.StorageError, msg, sys.exc_info()[2]
         else:
-            self.device = ebs.name2device(device)
+            device = ebs.name2device(device)
+            if fact['os']['name'] != 'windows':
+                if not os.path.exists(device):
+                    raise Exception((
+                        "Instance store device {} ({}) doesn't exist. "
+                        "Please check that instance type {} supports it").format(
+                            device, self.name, __node__['platform'].get_instance_type()))
+            self.device = device
 
 
     def _snapshot(self):

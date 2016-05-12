@@ -18,7 +18,7 @@ api_routes = {
     'mysql': 'scalarizr.api.mysql.MySQLAPI',
     'mysql2': 'scalarizr.api.mysql.MySQLAPI',
     'nginx': 'scalarizr.api.nginx.NginxAPI',
-    'operation': 'scalarizr.api.operation.OperationAPI',
+    'operation': 'scalarizr.api.operation.OperationAPIAdapter',
     'percona': 'scalarizr.api.percona.PerconaAPI',
     'postgresql': 'scalarizr.api.postgresql.PostgreSQLAPI',
     'rabbitmq': 'scalarizr.api.rabbitmq.RabbitMQAPI',
@@ -50,7 +50,8 @@ class BehaviorAPI(object):
                     "'{beh}' behavior is only supported on "
                     "Linux operation systems").format(beh=cls.behavior)
                 )
-            system_packages = system_packages or pkgmgr.package_mgr().list()
+            elif not linux.os.windows:
+                system_packages = system_packages or pkgmgr.package_mgr().list()
             installed = cls.do_check_software(system_packages=system_packages)
             cls.software_supported = True
             return installed

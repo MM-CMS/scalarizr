@@ -1,4 +1,3 @@
-from __future__ import with_statement
 
 import os
 import urllib2
@@ -6,6 +5,7 @@ import glob
 import sys
 import logging
 
+from scalarizr.util import metadata
 from scalarizr import platform
 from scalarizr import node
 from scalarizr.bus import bus
@@ -14,6 +14,7 @@ from scalarizr.platform import Platform, PlatformFeatures, PlatformError
 from scalarizr.platform import ConnectionError, NoCredentialsError, InvalidCredentialsError
 from . import storage
 from scalarizr import util
+from scalarizr import linux
 
 import cloudstack
 
@@ -25,12 +26,12 @@ LOG = logging.getLogger(__name__)
 
 
 def _create_connection():
-    platform = node.__node__['platform']
+    pl = node.__node__['platform']
     try:
         conn = cloudstack.Client(
-            platform.get_access_data('api_url'),
-            apiKey=platform.get_access_data('api_key'),
-            secretKey=platform.get_access_data('secret_key'))
+            pl.get_access_data('api_url'),
+            apiKey=pl.get_access_data('api_key'),
+            secretKey=pl.get_access_data('secret_key'))
     except PlatformError:
         raise NoCredentialsError(sys.exc_info()[1])
     return conn
@@ -55,22 +56,32 @@ class CloudStackPlatform(Platform):
         self.refresh_virtual_router_addr()
 
     def refresh_virtual_router_addr(self):
-        leases_pattern = '/var/lib/dhc*/dhclient*.leases'
-        if not self._dhcp_leases_path:
-            LOG.debug('Lookuping DHCP leases file')
-            try:
-                self._dhcp_leases_path = glob.glob(leases_pattern)[0]
-            except IndexError:
-                raise PlatformError("Can't find virtual router. No file matching pattern: %s", leases_pattern)
-        if os.stat(self._dhcp_leases_path).st_mtime == self._dhcp_leases_mtime:
-            return
+        if linux.os.windows:
+            provider = metadata.provider()
+            self._router_addr = provider.get_dhcp_server()
+        else:
+            # XXX: left this here, until metadata lib will completely replace it (make task)
+            leases_pattern = '/var/lib/dhc*/dhclient*.lease*'
+            if not self._dhcp_leases_path:
+                LOG.debug('Lookuping DHCP leases file')
+                try:
+                    leases_files = glob.glob(leases_pattern)
+                    # take the most recently modified file
+                    leases_files = sorted(
+                        leases_files,
+                        lambda x, y: cmp(os.stat(x).st_mtime, os.stat(y).st_mtime))
+                    self._dhcp_leases_path = leases_files[-1]
+                except IndexError:
+                    raise PlatformError("Can't find virtual router. No file matching pattern: %s", leases_pattern)
+            if os.stat(self._dhcp_leases_path).st_mtime == self._dhcp_leases_mtime:
+                return
 
-        LOG.debug('Lookuping meta-data server address')
-        for line in open(self._dhcp_leases_path):
-            if 'dhcp-server-identifier' in line:
-                self._router_addr = filter(None, line.split(';')[0].split(' '))[2]
-        LOG.debug('Meta-data server: %s', self._router_addr)
-        self._dhcp_leases_mtime = os.stat(self._dhcp_leases_path).st_mtime
+            LOG.debug('Lookuping meta-data server address')
+            for line in open(self._dhcp_leases_path):
+                if 'dhcp-server-identifier' in line:
+                    self._router_addr = filter(None, line.split(';')[0].split(' '))[2]
+            LOG.debug('Meta-data server: %s', self._router_addr)
+            self._dhcp_leases_mtime = os.stat(self._dhcp_leases_path).st_mtime
 
     def get_private_ip(self):
         return self.get_meta_data('local-ipv4')
@@ -78,16 +89,6 @@ class CloudStackPlatform(Platform):
     def get_public_ip(self):
         return self.get_meta_data('public-ipv4')
 
-    def get_user_data(self, key=None):
-        if self._userdata is None:
-            try:
-                self._userdata = self._parse_user_data(self.get_meta_data('user-data'))
-            except PlatformError, e:
-                if 'HTTP Error 404' in e:
-                    self._userdata = {}
-                else:
-                    raise
-        return Platform.get_user_data(self, key)
 
     def get_meta_data(self, key):
         self.refresh_virtual_router_addr()
@@ -124,7 +125,7 @@ class CloudStackPlatform(Platform):
             return ''
 
     def get_cloudstack_conn(self):
-        return CloudStackConnectionProxy(self._conn_pool) 
+        return CloudStackConnectionProxy(self._conn_pool)
 
     def new_cloudstack_conn(self):
         access_data = self.get_access_data()

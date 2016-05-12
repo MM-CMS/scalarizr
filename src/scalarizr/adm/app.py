@@ -6,7 +6,7 @@ Purpose of this script is to administrate scalarizr. It launches predefined comm
 which do some tasks. Commands could have inner commands themselves. Inner
 commands in relation to parent are called subcommands. Commands must have
 docstring which describes it and defines its usage. Docstring is used by docopt
-system to determine parsing rules. Commands are classes that inherit from 
+system to determine parsing rules. Commands are classes that inherit from
 Command class or methods or functions. Method or function-defined commands
 should be used only for simple tasks, for more complicated (>4 if's or for's,
 or uses some context variables) please use classes. Enter point is Szradm
@@ -22,7 +22,7 @@ As already mentioned before, remember that docstrings for commands are essential
 to write. Not only parser uses them to know what to do with argument list, but
 you are writing command-line tool that people will be using, write them as
 detailed as possible.
-Options must be described under 'Options:' section, otherwise they won't be 
+Options must be described under 'Options:' section, otherwise they won't be
 parsed.
 """
 
@@ -30,8 +30,6 @@ parsed.
 import sys
 import os
 import imp
-import time
-import inspect
 from textwrap import dedent
 
 from scalarizr import linux
@@ -53,7 +51,6 @@ def find_modules(directory):
     Module is imported at the time it is accessed.
     """
     directory = os.path.abspath(directory)
-    result = []
 
     dir_content = os.listdir(directory)
     module_names = [m.replace('.py', '') for m in dir_content]
@@ -61,6 +58,7 @@ def find_modules(directory):
     this_module = os.path.basename(__file__).replace('.py', '')
 
     for name in module_names:
+        # TODO: implement next when windows support will be released
         if name in ('__init__', this_module) or \
             (linux.os.windows_family and name not in windows_supported_modules):
             continue
@@ -88,7 +86,7 @@ class Szradm(command_module.Command):
       -e, --endpoint=<endpoint>    Sets endpoint for message send.
       -f, --msgfile=<msgfile>      Sets message file.
       -o, --queue=<queue>          Sets queue which will be used for message delivery.
-      -q, --queryenv               QueryEnv CLI with a raw XML output. 
+      -q, --queryenv               QueryEnv CLI with a raw XML output.
       --api-version=<api-version>  Set QueryEnv API version which will be used in call.
                                    QueryEnv parameters should be passed in <key>=<value> form.
       --fire-event=<event_name>    Fires custom event on Scalr.
@@ -112,7 +110,7 @@ class Szradm(command_module.Command):
         super(Szradm, self).__init__()
         self.subcommands = self.find_commands(commands_dir)
 
-    def __call__(self, 
+    def __call__(self,
         command=None,
         version=False,
         help=False,
@@ -130,22 +128,25 @@ class Szradm(command_module.Command):
         role_name=None,
         with_initializing=None,
         https=None,
-        args=[]):
+        args=None):
+
+        if args is None:
+            args = []
 
         if version:
-            print 'Szradm version: %s.%s' % self.version
+            print('Szradm version: %s.%s' % self.version)
             return
 
         if help:
             self.subcommands = list(self.subcommands)
-            print self.help() + self._command_help()
+            print(self.help() + self._command_help())
             return
 
         try:
             # old-style command execution for backward compatibility
             if queryenv:
                 if not command:
-                  raise command_module.CommandError('No queryenv method given.')
+                    raise command_module.CommandError('No queryenv method given.')
                 args = ['fetch', 'command='+command] + args
                 return self.run_subcommand('queryenv', args)
 
@@ -174,17 +175,17 @@ class Szradm(command_module.Command):
                 kwds['args'] = args
                 try:
                     return self.run_subcommand('queryenv', [command], kwds)
-                except command_module.InvalidCall, e:
+                except command_module.InvalidCall as e:
                     raise command_module.InvalidCall('Invalid call', usage=self.help())
 
             # Standard command execution style
             return self.run_subcommand(command, args)
 
-        except (command_module.UnknownCommand, command_module.InvalidCall), e:
+        except (command_module.UnknownCommand, command_module.InvalidCall) as e:
             message = '\n'.join((str(e), e.usage))
             raise e.__class__(message)
 
-        except command_module.CommandError, e:
+        except command_module.CommandError as e:
             # except-section for user-defined exceptions, semantic errors, etc.
             raise command_module.CommandError(str(e))
 
@@ -192,7 +193,6 @@ class Szradm(command_module.Command):
         """
         Method returns iterator over Command subclasses that found in modules of given directory
         """
-        result = []
         if not directory:
             directory = __dir__
         modules = find_modules(directory)

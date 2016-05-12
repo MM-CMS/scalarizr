@@ -1,5 +1,6 @@
 
 import os
+import sys
 import glob
 import time
 import random
@@ -11,10 +12,11 @@ from scalarizr.api.image import ImageAPIDelegate
 from scalarizr.api.image import ImageAPIError
 from scalarizr import util
 from scalarizr.util import software
-from scalarizr.linux import pkgmgr 
+from scalarizr.linux import coreutils
+from scalarizr.linux import pkgmgr
 from scalarizr.linux import os as os_dist
 from scalarizr.node import __node__
-from scalarizr.storage2.cloudfs import FileTransfer
+from scalarizr.storage2 import largetransfer
 
 
 LOG = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ class GCEImageAPIDelegate(ImageAPIDelegate):
         proj_id = pl.get_numeric_project_id()
         try:
             LOG.info('Registering new image %s' % image_name)
-            compute = pl.new_compute_client()
+            compute = pl.get_compute_conn()
 
             image_url = 'http://storage.googleapis.com/%s/%s' % (bucket_name, archive_name)
 
@@ -104,9 +106,16 @@ class GCEImageAPIDelegate(ImageAPIDelegate):
             pl = __node__['platform']
             proj_id = pl.get_numeric_project_id()
             proj_name = pl.get_project_id()
-            cloudstorage = pl.new_storage_client()
+            cloudstorage = pl.get_storage_conn()
 
-            root_part_path = os.path.realpath('/dev/root')
+            root_part_path = None
+            for d in coreutils.df():
+                if d.mpoint == '/':
+                    root_part_path = d.device
+                    break
+            else:
+                raise ImageAPIError('Failed to find root volume')
+
             root_part_sysblock_path = glob.glob('/sys/block/*/%s' % os.path.basename(root_part_path))[0]
             root_device = '/dev/%s' % os.path.basename(os.path.dirname(root_part_sysblock_path))
 
@@ -127,20 +136,25 @@ class GCEImageAPIDelegate(ImageAPIDelegate):
 
             LOG.info('Uploading compressed image to cloud storage')
             tmp_bucket_name = 'scalr-images-%s-%s' % (random.randint(1, 1000000), int(time.time()))
-            remote_path = 'gcs://%s/%s' % (tmp_bucket_name, archive_name)
-            arch_size = os.stat(archive_path).st_size
-            uploader = FileTransfer(src=archive_path, dst=remote_path)
+            remote_dir = 'gcs://%s' % tmp_bucket_name
 
+            def progress_cb(progress):
+                LOG.debug('Uploading {perc}%'.format(perc=progress / os.path.getsize(archive_path)))
+
+            uploader = largetransfer.Upload(archive_path, remote_dir, simple=True,
+                                            progress_cb=progress_cb)
+            uploader.apply_async()
             try:
-                upload_result = uploader.run()
-                if upload_result['failed']:
-                    errors = [str(failed['exc_info'][1]) for failed in upload_result['failed']]
-                    raise ImageAPIError('Image upload failed. Errors:\n%s' % '\n'.join(errors))
-                assert arch_size == upload_result['completed'][0]['size']
+                uploader.join()
             except:
+                if uploader.error:
+                    error = uploader.error[1]
+                else:
+                    error = sys.exc_info()[1]
+                msg = 'Image upload failed. Error:\n{error}'
+                msg = msg.format(error=error)
                 self._remove_bucket(tmp_bucket_name, archive_name, cloudstorage)
-                raise
-
+                raise ImageAPIError(msg)
         finally:
             shutil.rmtree(rebundle_dir)
             if os.path.exists(archive_path):

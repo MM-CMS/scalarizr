@@ -29,10 +29,11 @@ class HTTPRedirectHandler(urllib2.HTTPRedirectHandler):
             # do the same.
             # be conciliant with URIs containing a space
             newurl = newurl.replace(' ', '%20')
-            newheaders = dict((k,v) for k,v in req.headers.items()
-                                            if k.lower() not in ("content-length", "content-type")
-                                            )
+            newheaders = dict((k, v) 
+                for k, v in req.headers.items()
+                if k.lower() not in ("content-length", "content-type"))
             return urllib2.Request(newurl,
+                                    data=req.get_data(),
                                     headers=newheaders,
                                     origin_req_host=req.get_origin_req_host(),
                                     unverifiable=True)

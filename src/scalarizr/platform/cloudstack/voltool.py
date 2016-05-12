@@ -1,11 +1,8 @@
-from __future__ import with_statement
 '''
 Created on Aug 25, 2010
 
 @author: marat
 '''
-
-from __future__ import with_statement
 
 from scalarizr.util import wait_until, system2
 
@@ -74,7 +71,11 @@ def create_volume(conn, name, zone_id, size=None, disk_offering_id=None, snap_id
     if snap_id:
         wait_snapshot(conn, snap_id, logger)
 
-    vol = conn.createVolume(name, size=size, diskOfferingId=disk_offering_id, snapshotId=snap_id, zoneId=zone_id)
+    vol = conn.createVolume(name,
+        size=size,
+        diskOfferingId=disk_offering_id,
+        snapshotId=snap_id,
+        zoneId=zone_id)
     logger.debug('Volume %s created%s', vol.id, snap_id and ' from snapshot %s' % snap_id or '')
 
     if vol.state not in AVAIL_STATES:
@@ -107,10 +108,8 @@ def attach_volume(conn, volume_id, instance_id, device_id=None,
             lambda: volume_attached(conn.listVolumes(id=volume_id)[0]),
             logger=logger, timeout=timeout,
             error_text="Volume %s wasn't attached in a reasonable time"
-                            " (vm_id: %s)." % (
-                            volume_id, instance_id)
-    )
-    logger.debug('Volume %s attached',  volume_id)
+                " (vm_id: %s)." % (volume_id, instance_id))
+    logger.debug('Volume %s attached', volume_id)
 
     vol = conn.listVolumes(id=volume_id)[0]
     devname = get_system_devname(vol.deviceid)
@@ -148,7 +147,8 @@ def get_disk_offering_id(conn, size):
 
 def get_system_devname(deviceid):
     if isinstance(deviceid, int):
-        return '/dev/%sd%s' % ('xv' if os.path.exists('/dev/xvda') else 's', string.ascii_letters[deviceid])
+        prefix = 'xv' if os.path.exists('/dev/xvda') else 's'
+        return '/dev/%sd%s' % (prefix, string.ascii_letters[deviceid])
     return deviceid
 
 

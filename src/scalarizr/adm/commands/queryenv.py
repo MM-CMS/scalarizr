@@ -1,31 +1,16 @@
 import inspect
-import re
-import os
-import itertools
-import sys
 from urllib2 import HTTPError
 from xml.dom import minidom
-try:
-    import json as json_module
-except ImportError:
-    import simplejson as json_module
+import json as json_module
+from xml.etree import ElementTree as ET
 import yaml
 
-from scalarizr.util import system2
 from scalarizr.adm.command import Command
-from scalarizr.adm.command import printable_usage
-from scalarizr.adm.command import TAB_SIZE
 from scalarizr.adm.command import CommandError
 from scalarizr.adm.util import make_table
-from scalarizr.adm.util import new_queryenv
-from scalarizr.node import __node__
 from scalarizr.queryenv import xml2dict
 from scalarizr.queryenv import QueryEnvError
-
-if sys.version_info[0:2] >= (2, 7):
-    from xml.etree import ElementTree as ET
-else:
-    from scalarizr.externals.etree import ElementTree as ET
+from scalarizr.queryenv import new_queryenv
 
 
 def transpose(l):
@@ -38,7 +23,7 @@ class Queryenv(Command):
 
     Usage:
       queryenv [--format=(xml|json|yaml)] <method> [<args>...]
-    
+
     Options:
       -f <format>, --format=<format>  Output format: xml (default), json or yaml.
     """
@@ -48,11 +33,6 @@ class Queryenv(Command):
 
     def __init__(self):
         super(Queryenv, self).__init__()
-
-    # def help(self):
-    #     doc = super(Queryenv, self).help()
-    #     methods = [(' '*TAB_SIZE) + m for m in self.get_supported_methods()]
-    #     return doc + '\nSupported methods:\n' + '\n'.join(methods)
 
     @classmethod
     def get_method_name(cls, alias):
@@ -78,14 +58,10 @@ class Queryenv(Command):
 
     @classmethod
     def get_supported_oldstyle_methods(cls):
-        """ 
+        """
         Returns list of methods that are supported for old-style calling with
         szradm <queryenv_method> [args...] with table output
         """
-        # usage_section = printable_usage(cls.__doc__)
-        # usages = re.findall(r'queryenv .+?\s', usage_section)
-        # methods = [s.split()[1] for s in usages if '<method>' not in s]
-        # return methods
         return ['get-https-certificate',
             'get-latest-version',
             'list-ebs-mountpoints',
@@ -95,15 +71,15 @@ class Queryenv(Command):
     @classmethod
     def queryenv(cls):
         if not hasattr(cls, '_queryenv'):
-            cls._queryenv = new_queryenv()
+            cls._queryenv = new_queryenv(autoretry=False)
         return cls._queryenv
 
     def _display_get_https_certificate(self, out):
         headers = ['cert', 'pkey', 'cacert']
-        print make_table(out, headers)
+        print(make_table(out, headers))
 
     def _display_get_latest_version(self, out):
-        print make_table([[out]], ['version'])
+        print(make_table([[out]], ['version']))
 
     def _display_list_ebs_mountpoints(self, out):
         headers = ['name', 'dir', 'createfs', 'isarray', 'volume-id', 'device']
@@ -112,7 +88,7 @@ class Queryenv(Command):
             volume_params = [(v.volume_id, v.device) for v in d.volumes]
             volumes, devices = transpose(volume_params)
             table_data.append([d.name, d.dir, d.create_fs, d.is_array, volumes, devices])
-        print make_table(table_data, headers)
+        print(make_table(table_data, headers))
 
     def _display_list_roles(self, out):
         headers = ['behaviour',
@@ -126,34 +102,34 @@ class Queryenv(Command):
         for d in out:
             behaviour = ', '.join(d.behaviour)
             for host in d.hosts:
-                table_data.append([behaviour, 
+                table_data.append([behaviour,
                                    d.name,
                                    d.farm_role_id,
                                    str(host.index),
                                    host.internal_ip,
                                    host.external_ip,
                                    str(host.replication_master)])
-        print make_table(table_data, headers)
+        print(make_table(table_data, headers))
 
     def _display_list_virtual_hosts(self, out):
         headers = ['hostname', 'https', 'type', 'raw']
         table_data = [[d.hostname, d.https, d.type, d.raw] for d in out]
-        print make_table(table_data, headers)
+        print(make_table(table_data, headers))
 
     def _display_list_global_variables(self, out):
         headers = ['key', 'value']
-        table_data = out['public'].items()
-        print make_table(table_data, headers)
+        table_data = list(out['public'].items())
+        print(make_table(table_data, headers))
 
     def _display_fetch(self, out, format='xml'):
         if format == 'xml':
             print minidom.parseString(out).toprettyxml(encoding='utf-8')
         elif format == 'json':
             out_dict = xml2dict(ET.XML(out))
-            print json_module.dumps(out_dict, indent=4, sort_keys=True, ensure_ascii=False)
+            print(json_module.dumps(out_dict, indent=4, sort_keys=True, ensure_ascii=False))
         elif format == 'yaml':
             out_dict = xml2dict(ET.XML(out))
-            print yaml.dump(out_dict, default_flow_style=False, allow_unicode=True)
+            print(yaml.dump(out_dict, default_flow_style=False, allow_unicode=True))
         else:
             raise CommandError('Unknown output format.\nAvailable formats: xml, json, yaml')
 
@@ -181,9 +157,9 @@ class Queryenv(Command):
                 display_kwds['format'] = format
             display_method(out, **display_kwds)
         elif isinstance(out, list) and isinstance(out[0], list) and method != 'fetch':
-            print make_table(out)
+            print(make_table(out))
         else:
-            print out
+            print(out)
 
     def _run_queryenv_method(self, method, kwds, kwds_mapping=None):
         """
@@ -216,7 +192,7 @@ class Queryenv(Command):
             filtered_kwds['params'] = kwds
         try:
             return m(**filtered_kwds)
-        except (QueryEnvError, HTTPError), e:
+        except (QueryEnvError, HTTPError) as e:
             if isinstance(e, HTTPError) and method == 'fetch':
                 message = '%s method is not supported' % filtered_kwds['command']
             else:
@@ -253,7 +229,7 @@ class Queryenv(Command):
 
         for pair in args:
             if not pair.startswith('-') and '=' in pair:
-                k, v = pair.split('=')
+                k, v = pair.split('=', 1)
                 kwds[k] = v
 
         kwds_mapping = {}

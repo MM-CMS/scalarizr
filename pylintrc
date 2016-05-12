@@ -30,8 +30,8 @@ load-plugins=
 # can either give multiple identifier separated by comma (,) or put this option
 # multiple time (only on the command line, not in the configuration file where
 # it should appear only once).
-disable=C0111,C0103,E1103,W0142,W0141,W0702,R0903,W0613,R0201
-# C0111 - Missing docstring 
+disable=C0111,C0103,E1103,W0142,W0141,W0702,R0903,W0613,R0201,C0330
+# C0111 - Missing docstring
 #  - In our promises
 # C0103 - Invalid name "%s" (should match %s)
 #  - Fires for 2 letter variables
@@ -44,11 +44,13 @@ disable=C0111,C0103,E1103,W0142,W0141,W0702,R0903,W0613,R0201
 # W0702 - Exception class not specified in except statement
 #  - Sometimes we need to catch any exception or object
 # W0613 - Unused argument '%s'
-#  - Inheritance and interfaces  
+#  - Inheritance and interfaces
 # R0201 - Method could be a function
 #  - We know better
 # R0903 - Too few public methods
 #  - We need classes even without methods
+# C0330 - bad-continuation:
+#  - Wrong %s indentation%s. TODO
 
 [REPORTS]
 
@@ -92,6 +94,7 @@ max-module-lines=2000
 #indent-string='\t'
 indent-string='    '
 
+indent-after-paren=4
 
 [MISCELLANEOUS]
 

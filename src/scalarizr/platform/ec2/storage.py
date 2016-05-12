@@ -1,14 +1,11 @@
-from __future__ import with_statement
 '''
 Created on Nov 24, 2010
 
 @author: marat
 @author: Dmytro Korsakov
 '''
-from __future__ import with_statement
 
 from scalarizr.bus import bus
-from scalarizr.platform import PlatformError
 from scalarizr.storage import Storage, Volume, VolumeProvider, StorageError, devname_not_empty, \
         VolumeConfig, Snapshot
 from scalarizr.storage.transfer import TransferProvider, TransferError
@@ -23,7 +20,7 @@ import threading
 import string
 
 from boto.s3.key import Key
-from boto.exception import BotoServerError, S3ResponseError
+from boto.exception import S3ResponseError
 from scalarizr.util import firstmatched, wait_until
 from scalarizr import linux
 
@@ -121,7 +118,7 @@ class EbsVolumeProvider(VolumeProvider):
 
                     for volume in volumes:
                         volume_device = volume.attach_data.device
-                        volume_device = re.sub('\d+', '', volume_device)
+                        volume_device = re.sub(r'\d+', '', volume_device)
                         try:
                             avail_letters.remove(volume_device[-1])
                         except ValueError:
@@ -159,12 +156,16 @@ class EbsVolumeProvider(VolumeProvider):
                         raise StorageError("EBS volume '%s' doesn't exist." % volume_id)
 
                     if ebs_vol.zone != pl.get_avail_zone():
-                        self._logger.warn('EBS volume %s is in the different availability zone (%s). ' +
-                                                        'Snapshoting it and create a new EBS volume in %s',
-                                                        ebs_vol.id, ebs_vol.zone, pl.get_avail_zone())
+                        self._logger.warn('EBS volume %s is in the different availability '
+                            'zone (%s). Snapshoting it and create a new EBS volume in %s',
+                            ebs_vol.id, ebs_vol.zone, pl.get_avail_zone())
                         volume_id = None
                         delete_snap = True
-                        snap_id = ebstool.create_snapshot(conn, ebs_vol, logger=self._logger, wait_completion=True, tags=kwargs.get('tags')).id
+                        snap_id = ebstool.create_snapshot(conn,
+                            ebs_vol,
+                            logger=self._logger,
+                            wait_completion=True,
+                            tags=kwargs.get('tags')).id
                     else:
                         snap_id = None
 
@@ -172,25 +173,27 @@ class EbsVolumeProvider(VolumeProvider):
                     self._logger.debug('Creating new EBS')
                     kwargs['avail_zone'] = pl.get_avail_zone()
                     ebs_vol = ebstool.create_volume(conn, kwargs.get('size'),
-                                                                            kwargs.get('avail_zone'), snap_id,
-                                                                            kwargs.get('volume_type'), kwargs.get('iops'),
-                                                                            logger=self._logger, tags=kwargs.get('tags'))
+                        kwargs.get('avail_zone'), snap_id,
+                        kwargs.get('volume_type'), kwargs.get('iops'),
+                        logger=self._logger, tags=kwargs.get('tags'))
 
                 if 'available' != ebs_vol.volume_state():
                     if ebs_vol.attachment_state() == 'attaching':
-                        wait_until(lambda: ebs_vol.update() and ebs_vol.attachment_state() != 'attaching', timeout=600,
-                                        error_text='EBS volume %s hangs in attaching state' % ebs_vol.id)
+                        wait_until(lambda: ebs_vol.update() and ebs_vol.attachment_state() != 'attaching',
+                            timeout=600,
+                            error_text='EBS volume %s hangs in attaching state' % ebs_vol.id)
 
                     if ebs_vol.attach_data.instance_id != pl.get_instance_id():
                         self._logger.debug('EBS is attached to another instance')
                         self._logger.warning("EBS volume %s is not available. Detaching it from %s",
-                                                                ebs_vol.id, ebs_vol.attach_data.instance_id)
+                            ebs_vol.id,
+                            ebs_vol.attach_data.instance_id)
                         ebstool.detach_volume(conn, ebs_vol, force=True, logger=self._logger)
                     else:
                         self._logger.debug('EBS is attached to this instance')
                         device = ebstool.real_devname(ebs_vol.attach_data.device)
                         wait_until(lambda: os.path.exists(device), sleep=1, timeout=300,
-                                        error_text="Device %s wasn't available in a reasonable time" % device)
+                            error_text="Device %s wasn't available in a reasonable time" % device)
                         volume_attached = True
 
                 if not volume_attached:
@@ -208,7 +211,8 @@ class EbsVolumeProvider(VolumeProvider):
                     if ebs_vol.update() and ebs_vol.attachment_state() != 'available':
                         ebstool.detach_volume(conn, ebs_vol, force=True, logger=self._logger)
 
-                raise StorageError, 'EBS volume construction failed: %s' % str(sys.exc_value), sys.exc_traceback
+                raise StorageError, 'EBS volume construction failed: %s' % str(sys.exc_value), \
+                    sys.exc_traceback
 
             finally:
                 if delete_snap and snap_id:
@@ -287,10 +291,10 @@ class EbsVolumeProvider(VolumeProvider):
 Storage.explore_provider(EbsVolumeProvider, default_for_snap=True)
 
 class S3TransferProvider(TransferProvider):
-    schema  = 's3'
+    schema = 's3'
     urlparse.uses_netloc.append(schema)
 
-    acl     = None
+    acl = None
 
     _logger = None
     _bucket = None
@@ -330,16 +334,16 @@ class S3TransferProvider(TransferProvider):
                 # Cache bucket
                 self._bucket = bck
 
-            file = None
+            fp = None
             try:
                 key = Key(self._bucket)
                 key.name = key_name
-                file = open(local_path, "rb")
-                key.set_contents_from_file(file, policy=self.acl)
+                fp = open(local_path, "rb")
+                key.set_contents_from_file(fp, policy=self.acl)
                 return self._format_path(bucket_name, key_name)
             finally:
-                if file:
-                    file.close()
+                if fp:
+                    fp.close()
 
         except:
             exc = sys.exc_info()
@@ -347,7 +351,7 @@ class S3TransferProvider(TransferProvider):
 
 
     def get(self, remote_path, local_path):
-        self._logger.info('Downloading %s from S3 to %s' % (remote_path, local_path))
+        self._logger.info('Downloading %s from S3 to %s', remote_path, local_path)
         bucket_name, key_name = self._parse_path(remote_path)
         dest_path = os.path.join(local_path, os.path.basename(remote_path))
 
@@ -374,7 +378,7 @@ class S3TransferProvider(TransferProvider):
         bucket_name, key_name = self._parse_path(remote_path)
         connection = self._get_connection()
         bkt = connection.get_bucket(bucket_name, validate=False)
-        files = [self._format_path(self.bucket.name, key.name) for key in bkt.list(prefix=key_name)]
+        files = [self._format_path(self._bucket.name, key.name) for key in bkt.list(prefix=key_name)]
         return tuple(files)
 
     def _bucket_check_cache(self, bucket):

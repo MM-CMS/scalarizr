@@ -1,4 +1,3 @@
-from __future__ import with_statement
 '''
 Created on Dec 24, 2009
 
@@ -21,6 +20,7 @@ import time
 from scalarizr import node
 from scalarizr.bus import bus
 from scalarizr import linux
+from scalarizr.util import metadata
 from scalarizr.util import LocalPool, NullPool
 if linux.os.windows_family:
     import win32com.client
@@ -104,21 +104,25 @@ class PlatformFactory(object):
 
     def new_platform(self, name):
         if not self._platforms.has_key(name):
-            pl = __import__("scalarizr.platform." + name, globals(), locals(), fromlist=["get_platform"])
+            pl = __import__("scalarizr.platform." + name,
+                globals(),
+                locals(),
+                fromlist=["get_platform"])
             self._platforms[name] = pl.get_platform()
 
-        return self._platforms[name];
+        return self._platforms[name]
 
 
 class PlatformFeatures:
-    VOLUMES         = 'volumes'
-    SNAPSHOTS       = 'snapshots'
+    VOLUMES = 'volumes'
+    SNAPSHOTS = 'snapshots'
 
 
-class Platform():
+class Platform(object):
     name = None
     _arch = None
     _userdata = None
+    _ip_addr = None
     _logger = logging.getLogger(__name__)
     features = []
     scalrfs = None
@@ -127,27 +131,27 @@ class Platform():
         self.scalrfs = self._scalrfs(self)
         node.__node__['access_data'] = {}
 
-    def get_private_ip(self):
-        return self.get_public_ip()
-
-    def get_public_ip(self):
-        return socket.gethostbyname(socket.gethostname())
+    def _get_ip_addr(self):
+        if not self._ip_addr:
+            ifaces = net_interfaces()
+            try:
+                self._ip_addr = [iface['ipv4'] for iface in ifaces
+                        if is_private_ip(iface['ipv4'])][0]
+            except IndexError:
+                try:
+                    self._ip_addr = [iface['ipv4'] for iface in ifaces
+                            if is_public_ip(iface['ipv4'])][0]
+                except IndexError:
+                    pass
+        return self._ip_addr
+    get_public_ip = _get_ip_addr
+    get_private_ip = _get_ip_addr
 
     def get_user_data(self, key=None):
-        cnf = bus.cnf
-        if self._userdata is None:
-            path = cnf.private_path('.user-data')
-            if os.path.exists(path):
-                rawmeta = None
-                with open(path, 'r') as fp:
-                    rawmeta = fp.read()
-                if not rawmeta:
-                    raise PlatformError("Empty user-data")
-                self._userdata = self._parse_user_data(rawmeta)
-        if key and self._userdata:
-            return self._userdata[key] if key in self._userdata else None
+        if key:
+            return metadata.user_data().get(key)
         else:
-            return self._userdata
+            return metadata.user_data()
 
     def set_access_data(self, access_data):
         node.__node__['access_data'] = access_data
@@ -217,15 +221,17 @@ class Platform():
                 scalr_id = queryenv.get_global_config()['params'].get('scalr.id', '')
             if scalr_id:
                 scalr_id = '-' + scalr_id
-            if bus.scalr_version >= (3, 1, 0):
-                return '%s://scalr%s-%s-%s' % (
-                        self.platform.cloud_storage_path.split('://')[0],
-                        scalr_id,
-                        self.ini.get('general', 'env_id'),
-                    self.ini.get('general', 'region')
-                )
+
+            if bus.optparser and bus.optparser.values.import_server:
+                # Fix for instance-store bundle
+                schema = 's3'
             else:
-                return self.platform.cloud_storage_path
+                schema = self.platform.cloud_storage_path.split('://')[0]
+
+            return '%s://scalr%s-%s-%s' % (
+                schema, scalr_id,
+                self.ini.get('general', 'env_id'),
+                self.ini.get('general', 'region'))
 
 
         def images(self):
@@ -271,15 +277,6 @@ class Ec2LikePlatform(Platform):
             self._metadata[name] = self._fetch_metadata(full_name)
         return self._metadata[name]
 
-    def get_user_data(self, key=None):
-        if self._userdata is None:
-            raw_userdata = self._fetch_metadata(self._userdata_key)
-            self._userdata = self._parse_user_data(raw_userdata)
-        if key:
-            return self._userdata[key] if key in self._userdata else None
-        else:
-            return self._userdata
-
     def _fetch_metadata(self, key):
         url = self._meta_url + key
         try:
@@ -289,7 +286,8 @@ class Ec2LikePlatform(Platform):
             if isinstance(e, urllib2.HTTPError):
                 if e.code == 404:
                     return ""
-            raise PlatformError("Cannot fetch %s metadata url '%s'. Error: %s" % (self.name, url, e))
+            raise PlatformError("Cannot fetch %s metadata url '%s'. Error: %s" %
+                (self.name, url, e))
 
     def get_private_ip(self):
         return self._get_property("local-ipv4")
@@ -348,7 +346,7 @@ class Architectures:
 
 
 if linux.os.windows_family:
-    from scalarizr.util import coinitialized
+    from common.utils.winutil import coinitialized
 
     @coinitialized
     def net_interfaces():
@@ -360,7 +358,7 @@ if linux.os.windows_family:
                 'ipv4': row.IPAddress[0],
                 'ipv6': row.IPAddress[1] if len(row.IPAddress) > 1 else None
                 } for row in result)
- 
+
 else:
     def net_interfaces():
         # http://code.activestate.com/recipes/439093-get-names-of-all-up-network-interfaces-linux-only/#c7
@@ -389,10 +387,12 @@ else:
 
 
 def is_private_ip(ipaddr):
-    return any(map(lambda x: ipaddr.startswith(x), ('10.', '172.', '192.168.')))
+    return any([ipaddr.startswith(x) for x in ('10.', '172.', '192.168.')])
+
 
 def is_local_ip(ipaddr):
     return ipaddr.startswith('127.')
+
 
 def is_public_ip(ipaddr):
     return not (is_private_ip(ipaddr) or is_local_ip(ipaddr))

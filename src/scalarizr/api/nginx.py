@@ -1,11 +1,11 @@
-from __future__ import with_statement
-
 import os
 import glob
 import shutil
 import logging
 import time
 import cStringIO
+import sys
+import multiprocessing
 from telnetlib import Telnet
 from hashlib import sha1
 
@@ -20,11 +20,9 @@ from scalarizr.util import system2
 from scalarizr.util import PopenError
 from scalarizr.util import Singleton
 from scalarizr.util import firstmatched
-from scalarizr import linux
 from scalarizr.linux import iptables
 from scalarizr.linux import LinuxError
 from scalarizr.linux import pkgmgr
-from scalarizr import exceptions
 from scalarizr.api import operation
 from scalarizr.config import BuiltinBehaviours
 from scalarizr.api import BehaviorAPI
@@ -71,7 +69,11 @@ class NginxInitScript(initdv2.ParametrizedInitScript):
         conf = metaconf.Configuration('nginx')
         conf.read(conf_path)
 
-        expected_workers_num = int(conf.get('worker_processes'))
+        expected_workers_num = conf.get('worker_processes')
+        if expected_workers_num == 'auto':
+            expected_workers_num = multiprocessing.cpu_count()
+        else:
+            expected_workers_num = int(expected_workers_num)
 
         out = system2(['ps -C nginx --noheaders'], shell=True)[0]
 
@@ -161,13 +163,35 @@ class NginxInitScript(initdv2.ParametrizedInitScript):
         else:
             self.socks = []
 
-def _open_port(port):
+
+def selinux_port(cmd, port):
+    """ cmd can be either 'add' or 'delete' """
+    if not port or not cmd:
+        return False
+    try:
+        pkgmgr.installed('policycoreutils-python')
+        system2(['semanage', 'port', '--%s' % cmd,
+            '--type', 'http_port_t', '--proto', 'tcp', str(port)])
+        return True
+    except:
+        e = sys.exc_info()[1]
+        if not "already defined" in e:
+            _logger.warning('{} port in selinux policy for nginx failed: {}'.format(cmd, e))
+        return False
+
+
+def open_port(port):
+    if linux.os.redhat_family:
+        selinux_port('add', port)
     if iptables.enabled():
         rule = {"jump": "ACCEPT", "protocol": "tcp", "match": "tcp", "dport": str(port)}
         iptables.FIREWALL.ensure([rule])
 
 
-def _close_port(port):
+def close_port(port):
+    # Cant know for sure what ports to close
+    # if linux.os.redhat_family:
+    #     selinux_port('delete', port)
     if iptables.enabled():
         rule = {"jump": "ACCEPT", "protocol": "tcp", "match": "tcp", "dport": str(port)}
         try:
@@ -201,10 +225,10 @@ def _fix_ssl_keypaths(vhost_template):
     good_keydir = os.path.join(bus.etc_path, "private.d/keys/")
     return vhost_template.replace(bad_keydir, good_keydir)
 
-    
+
 def _dump_config(obj):
     output = cStringIO.StringIO()
-    obj.write_fp(output, close = False)
+    obj.write_fp(output, close=False)
     return output.getvalue()
 
 
@@ -267,7 +291,7 @@ def update_ssl_certificate(ssl_certificate_id, cert, key, cacert):
 def _fetch_ssl_certificate(ssl_certificate_id):
     """
     Gets ssl certificate and key from Scalr, writes them to files and
-    returns paths to files.
+    returns paths to the files.
     """
     _queryenv = bus.queryenv_service
     cert, key, cacert = _queryenv.get_ssl_certificate(ssl_certificate_id)
@@ -283,9 +307,7 @@ class NginxAPI(BehaviorAPI):
     def __init__(self, app_inc_dir=None, proxies_inc_dir=None):
         """
         Basic API for configuring and managing Nginx service.
-
         Namespace::
-
             nginx
         """
         _logger.debug('Initializing nginx API.')
@@ -293,6 +315,7 @@ class NginxAPI(BehaviorAPI):
         self._op_api = operation.OperationAPI()
         self.error_pages_inc = None
         self.backend_table = {}
+        self._selinux_opened_ports = []
         self.app_inc_path = None
         self.proxies_inc_dir = proxies_inc_dir
         self.proxies_inc_path = None
@@ -403,9 +426,7 @@ class NginxAPI(BehaviorAPI):
     def start_service(self):
         """
         Starts Nginx service.
-
         Example::
-
             api.nginx.start_service()
         """
         self.service.start()
@@ -414,12 +435,9 @@ class NginxAPI(BehaviorAPI):
     def stop_service(self):
         """
         Stops Nginx service.
-
         :param reason: Message to appear in log before service is stopped.
         :type reason: str
-
         Example::
-
             api.nginx.stop_service("Configuring Nginx service.")
         """
         self.service.stop()
@@ -428,12 +446,9 @@ class NginxAPI(BehaviorAPI):
     def reload_service(self):
         """
         Reloads Nginx service.
-
         :param reason: Message to appear in log before service is reloaded.
         :type reason: str
-
         Example::
-
             api.nginx.reload("Applying proxy settings.")
         """
         self.service.reload()
@@ -442,12 +457,9 @@ class NginxAPI(BehaviorAPI):
     def restart_service(self):
         """
         Restarts Nginx service.
-
         :param reason: Message to appear in log before service is restarted.
         :type reason: str
-
         Example::
-
             api.nginx.stop_service("Applying new service configuration preset.")
         """
         self.service.restart()
@@ -456,9 +468,7 @@ class NginxAPI(BehaviorAPI):
     def configtest(self, reason=None):
         """
         Performs Nginx configtest.
-
         Example::
-
             api.nginx.configtest()
         """
         self.service.configtest()
@@ -471,18 +481,14 @@ class NginxAPI(BehaviorAPI):
     def recreate_proxying(self, proxy_list, reload_service=True):
         """
         Recreates Nginx proxying configuration.
-
         :param proxy_list: List of parameters for each proxy. Parameters are
             kwds-dict that passed to self.add_proxy()
         :type proxy_list: list
-
         :param reload_service: If True reloads nginx service after recreation.
         :type reload_service: bool
-        
+
         Example:
-
         Recreating proxying with single proxy configuration::
-
             api.nginx.recreate_proxying([{'name': 'test.com',
                                           'backends': [{'host': '12.234.45.67', 'port': '80'}],
                                           'port': '80'}])
@@ -493,6 +499,10 @@ class NginxAPI(BehaviorAPI):
         _logger.debug('Recreating proxying with %s' % proxy_list)
         self._clear_nginx_includes()
         self.backend_table = {}
+        if linux.os.redhat_family:
+            for p in self._selinux_opened_ports:
+                selinux_port('delete', p)
+        self._selinux_opened_ports = []
 
         try:
             for proxy_parms in proxy_list:
@@ -551,7 +561,7 @@ class NginxAPI(BehaviorAPI):
 
         _logger.debug('Clearing backend table')
         self.backend_table = {}
-        
+
         _logger.debug('backend table is %s' % self.backend_table)
         write_proxies = not self._main_config_contains_server()
         self.add_proxy('backend',
@@ -655,7 +665,7 @@ class NginxAPI(BehaviorAPI):
             config.remove('http/server')
         except (ValueError, IndexError):
             _logger.debug('no http/server section')
-        
+
         if not remove_server_section:
             _logger.debug('Rewriting http/server section')
             config.read(os.path.join(bus.share_path, "nginx/server.tpl"))
@@ -687,6 +697,7 @@ class NginxAPI(BehaviorAPI):
 
     def do_reconfigure(self, op, proxies):
         backend_table_bak = self.backend_table.copy()
+        selinux_opened_ports_bak = self._selinux_opened_ports
         main_conf_path = self.proxies_inc_dir + '/nginx.conf'
         try:
             self.app_inc_path = self.app_inc_path + '.new'
@@ -709,6 +720,10 @@ class NginxAPI(BehaviorAPI):
             os.remove(self.app_inc_path)
             os.remove(self.proxies_inc_path)
             self.backend_table = backend_table_bak
+            self._selinux_opened_ports = selinux_opened_ports_bak
+            if linux.os.redhat_family:
+                for p in self._selinux_opened_ports:
+                    selinux_port('add', p)
             _replace_string_in_file(main_conf_path,
                                     'proxies.include.new',
                                     'proxies.include')
@@ -746,7 +761,6 @@ class NginxAPI(BehaviorAPI):
     def _normalize_destinations(self, destinations):
         """
         Parses list of destinations. Dictionary example:
-
         .. code-block:: python
             {
             'farm_role_id': 123,
@@ -756,9 +770,7 @@ class NginxAPI(BehaviorAPI):
             # other backend params
             # ...
             }
-
         or
-
         .. code-block:: python
             {
             'host': '12.234.45.67',
@@ -768,7 +780,6 @@ class NginxAPI(BehaviorAPI):
             # other backend params
             # ...
             }
-
         Returns destination dictionaries with format like above
         plus servers list in 'servers' key.
         """
@@ -894,7 +905,7 @@ class NginxAPI(BehaviorAPI):
         for dest in destinations:
             servers = dest['servers']
             if len(servers) == 0:
-                # if role destination has no running servers yet, 
+                # if role destination has no running servers yet,
                 # adding mock server 127.0.0.1
                 servers = ['127.0.0.1']
             for server in servers:
@@ -946,7 +957,7 @@ class NginxAPI(BehaviorAPI):
         role_namepart = '_'.join(map(str, roles))
         if hash_name:
             name = sha1(name).hexdigest()
-        name = '%s%s__%s' % (name, 
+        name = '%s%s__%s' % (name,
                              (location.replace('/', '_')).rstrip('_'),
                              role_namepart)
         name = name.rstrip('_')
@@ -966,19 +977,13 @@ class NginxAPI(BehaviorAPI):
         """
         Makes backend for each group of destinations and writes it to
         app-servers config file.
-
         Returns tuple of pairs with location and backend names:
         [[dest1, dest2], [dest3]] -> ((location1, name1), (location2, name2))
-
-        Tuple of pairs is used instead of dict, because we need to keep order 
+        Tuple of pairs is used instead of dict, because we need to keep order
         saved.
-
         Name of backend is construct by pattern:
-
             ```hostname`[_`location`][__`role_id1`[_`role_id2`[...]]]``
-
         Example:
-
             ``test.com_somepage_123_345``
         """
         locations_and_backends = ()
@@ -1084,7 +1089,7 @@ class NginxAPI(BehaviorAPI):
         config.add('server/ssl_session_timeout', '10m')
         config.add('server/ssl_session_cache', 'shared:SSL:10m')
         config.add('server/ssl_protocols', 'SSLv2 SSLv3 TLSv1')
-        config.add('server/ssl_ciphers', 
+        config.add('server/ssl_ciphers',
                    'ALL:!ADH:!EXPORT56:RC4+RSA:+HIGH:+MEDIUM:+LOW:+SSLv2:+EXP')
         config.add('server/ssl_prefer_server_ciphers', 'on')
 
@@ -1121,7 +1126,7 @@ class NginxAPI(BehaviorAPI):
             os.remove(temp_file)
         else:
             self._add_default_template(config)
-        
+
         if port:
             config.add('server/listen', str(port))
         try:
@@ -1135,7 +1140,7 @@ class NginxAPI(BehaviorAPI):
             self._add_ssl_params(config, 'server', ssl_port, ssl_certificate_id, port!=None)
 
         config.add('server/include', self.error_pages_inc)
-        
+
         # Adding locations leading to defined backends
 
         for i, (location, backend_name) in enumerate(locations_and_backends):
@@ -1213,57 +1218,38 @@ class NginxAPI(BehaviorAPI):
                   **kwds):
         """
         Adds proxy.
-
         All backend_* params are used for default values and can be overrided
         by values given for certain backend in backends list
-
         :param name: name for proxy. Used as hostname - server_name in nginx server section
-
         :param backends: is list of dictionaries which contains servers
         and/or roles with params and inner naming in this module for such dicts
         is ``destinations``. So keep in mind that ``backend`` word in all other
         places of this module means nginx upstream config.
-
         :param port: port for proxy to listen http
-
         :param http: if False proxy will not listen http port
-
         :param ssl: if True proxy will listen ssl port
-
         :param ssl_port: port for proxy to listen https
-
         :param ssl_certificate_id: scalr ssl certificate id. Will be fetched through queryenv
-
         :param backend_port: default port for backend servers to be proxied on
-
         :param backend_ip_hash: defines default presence of ip_hash in backend config
-
         :param backend_least_conn: defines default presence of least_conn in backend config
-
         :param backend_max_fails: default value of max_fails for servers in backends
-
         :param backend_fail_timeout: default value (in secs) of fail_timeout for servers in backends
-
         :param backend_weight: default value of weight for servers in backends
-
         :param templates: list of template dictionaries.
         Template dictionary consists of template content and location to be included in.
         'server' key determines that template is used for all proxy-server config part,
         not separate location.
         E.g.: ``[{'content': <raw_config>, 'location': '/admin'},
                  {'content': <another_raw>, 'server': True}]``
-
         :param reread_conf: if True app_servers_inc and proxies_inc will be reloaded from files
         before proxy addition
-
         :param reload_service: if True service will be reloaded after proxy will be added
-
         :param hash_backend_name: if True backend names will be hashed
-
         :param write_proxies: if False changes will not be written in proxies_inc file.
         This can be used if we only need to add backend.
         """
-        # typecast is needed because scalr sends bool params as strings: '1' for True, '0' for False 
+        # typecast is needed because scalr sends bool params as strings: '1' for True, '0' for False
         ssl = _bool_from_scalr_str(ssl)
         http = _bool_from_scalr_str(http) if ssl else True
         backend_ip_hash = _bool_from_scalr_str(backend_ip_hash)
@@ -1298,6 +1284,13 @@ class NginxAPI(BehaviorAPI):
 
         for backend_destinations, (_, backend_name) \
             in zip(grouped_destinations, locations_and_backends):
+
+            if linux.os.redhat_family:
+                for destination in backend_destinations:
+                    p = destination.get('port')
+                    if selinux_port('add', p):
+                        self._selinux_opened_ports.append(p)
+
             self.backend_table[backend_name] = backend_destinations
 
         grouped_templates = self._group_templates(templates)
@@ -1325,9 +1318,9 @@ class NginxAPI(BehaviorAPI):
                                    redirector=False)
 
         if port:
-            _open_port(port)
+            open_port(port)
         if ssl_port:
-            _open_port(ssl_port)
+            open_port(ssl_port)
 
         self._save_app_servers_inc()
         if write_proxies:
@@ -1362,7 +1355,7 @@ class NginxAPI(BehaviorAPI):
             if name == server_name:
                 location_xpath = '%s/location' % server_xpath
                 location_qty = len(self.proxies_inc.get_list(location_xpath))
-                
+
                 for j in xrange(location_qty):
                     xpath = location_xpath + ('[%i]' % (j + 1))
                     backend = self.proxies_inc.get(xpath + '/proxy_pass')
@@ -1371,7 +1364,7 @@ class NginxAPI(BehaviorAPI):
 
                 for addr in self.proxies_inc.get_list('%s/listen' % server_xpath):
                     port = addr.split()[0]
-                    _close_port(port)
+                    close_port(port)
 
                 xpaths_to_remove.append(server_xpath)
 
@@ -1391,21 +1384,14 @@ class NginxAPI(BehaviorAPI):
     def remove_proxy(self, hostname, reload_service=True):
         """
         Removes proxy with given hostname. Removes created server and its backends.
-
         :param hostname: nginx proxy server name.
         :type hostname: str
-
         :param reload_service: If True reloads nginx service after proxy removal.
         :type reload_service: bool
-
         Examples:
-
         Remove proxy with name `test.com`::
-
             api.nginx.remove_proxy('test.com')
-
         Remove proxy with name `test.com` without service reload::
-
             api.nginx.remove_proxy('test.com', reload_service=True)
         """
         reload_service = _bool_from_scalr_str(reload_service)
@@ -1419,7 +1405,14 @@ class NginxAPI(BehaviorAPI):
         # remove each backend that were in use by this proxy from backend_table
         for backend_name in self.backend_table.keys():
             if hostname == self._backend_nameparts(backend_name)[0]:
-                self.backend_table.pop(backend_name)
+                destinations = self.backend_table.pop(backend_name)
+
+                if linux.os.redhat_family:
+                    for destination in destinations:
+                        p = destination.get('port')
+                        if p and p in self._selinux_opened_ports:
+                            selinux_port('delete', p)
+                            self._selinux_opened_ports.remove(p)
 
         self.service.set_port_to_check(self._get_any_port(self.proxies_inc))
 
@@ -1434,17 +1427,12 @@ class NginxAPI(BehaviorAPI):
         RPC method for adding or updating proxy configuration.
         Removes proxy with given hostname if exists and recreates it with given
         parameters. If some exception occures changes are reverted.
-
         :param hostname: nginx proxy server name.
         :type hostname: str
-
         See add_proxy() for detailed kwds description.
-
         Example:
-
         Make proxy with name `test.com`::
-
-            api.nginx.make_proxy('test.com', 
+            api.nginx.make_proxy('test.com',
                                  backends=[{'host': '123.321.111.1'}],
                                  port='8080',
                                  backend_port='80')
@@ -1518,32 +1506,22 @@ class NginxAPI(BehaviorAPI):
         """
         Adds server to backend with given name pattern.
         Parameter server can be dict or string (ip addr)
-
         :param backend: backend's name to which server will be added.
         :type backend: str
-
         :param server: server configuration. Can be just IP of the server or
             dict of parameters (such as 'down', 'backup' or 'port')
         :type server: dict or str
-
-        :param update_conf: if True updates app_servers_inc object from file 
+        :param update_conf: if True updates app_servers_inc object from file
             before performing server addition.
         :type update_conf: bool
-
         :param reload_service: if True reloads nginx service after server addition.
         :type reload_service: bool
-
         :param update_backend_table: if True updates self.backend_table after server addition.
         :type update_backend_table: bool
-
         Examples:
-
         Adding server without parameters to backend `backend`::
-
             api.nginx.add_server('backend', '123.321.111.19')
-
         Adding server with non-standard port to backend `test`::
-
             api.nginx.add_server('test', {'host': '11.22.33.44', 'port': '8089'})
         """
         update_conf = _bool_from_scalr_str(update_conf)
@@ -1591,27 +1569,19 @@ class NginxAPI(BehaviorAPI):
         """
         Removes server from backend with given name pattern.
         Parameter server can be dict or string (ip addr)
-
         :param backend: backend's name from which server will be removed.
         :type backend: str
-
         :param server: server IP.
         :type server: str
-
-        :param update_conf: if True updates app_servers_inc object from file 
+        :param update_conf: if True updates app_servers_inc object from file
             before performing server removal.
         :type update_conf: bool
-
         :param reload_service: if True reloads nginx service after server removal.
         :type reload_service: bool
-
         :param update_backend_table: if True updates self.backend_table after server removal.
         :type update_backend_table: bool
-
         Example:
-
         Removing server from backend `backend`::
-
             api.nginx.remove_server('backend', '123.321.111.19')
         """
         update_conf = _bool_from_scalr_str(update_conf)
@@ -1653,30 +1623,21 @@ class NginxAPI(BehaviorAPI):
         """
         Adds server to each backend that uses given role. If role isn't used in
         any backend, does nothing
-
         :param server: server configuration. Can be just IP of the server or
             dict of parameters (such as 'down', 'backup' or 'port')
         :type server: dict or str
-
         :param role_id: Id of the role in which new server is up.
         :type role_id: str
-
         :param update_conf: if True updates app_servers_inc object from file
             before performing server addition.
         :type update_conf: bool
-
         :param reload_service: if True reloads nginx service after server addition.
         :type reload_service: bool
-
         Examples:
-
         Adding server without parameters to backends that are contain role `1234`::
-
             api.nginx.add_server_to_role('123.321.111.19', '1234')
-
         Adding server with non-standard port to backends that are contain
                 role `4321`::
-
             api.nginx.add_server_to_role({'host': '11.22.33.44', 'port': '8089'},
                                              '4321')
         """
@@ -1702,7 +1663,7 @@ class NginxAPI(BehaviorAPI):
                     srv.update(dest)
                     srv.pop('servers')
                     srv.pop('id')
-                    
+
                     self.add_server(backend_name, srv, False, False)
                     if len(dest['servers']) == 0:
                         self.remove_server(backend_name, '127.0.0.1', False, False)
@@ -1724,24 +1685,17 @@ class NginxAPI(BehaviorAPI):
         """
         Removes server from each backend that uses given role. If role isn't
         used in any backend, does nothing
-
         :param server: server IP
         :type server: str
-
         :param role_id: Id of the role in which server is down.
         :type role_id: str
-
-        :param update_conf: if True updates app_servers_inc object from file 
+        :param update_conf: if True updates app_servers_inc object from file
             before performing server removal.
         :type update_conf: bool
-
         :param reload_service: if True reloads nginx service after server removal.
         :type reload_service: bool
-
         Example:
-
         Removing server from backends that are contain role `1234`::
-
             api.nginx.remove_server_from_role('123.321.111.19', '1234')
         """
         update_conf = _bool_from_scalr_str(update_conf)
@@ -1782,21 +1736,15 @@ class NginxAPI(BehaviorAPI):
         """
         Method is used to remove stand-alone servers, that aren't belong
         to any role. If role isn't used in any backend, does nothing
-
         :param server: Server IP.
         :type server: str
-
-        :param update_conf: if True updates app_servers_inc object from file 
+        :param update_conf: if True updates app_servers_inc object from file
             before performing server removal.
         :type update_conf: bool
-
         :param reload_service: if True reloads nginx service after server removal.
         :type reload_service: bool
-
         Example:
-
         Removing server from all backends::
-
             api.nginx.remove_server_from_all_backends('123.321.111.19')
         """
         update_conf = _bool_from_scalr_str(update_conf)
@@ -1831,28 +1779,19 @@ class NginxAPI(BehaviorAPI):
                    reload_service=True):
         """
         Enables SSL support on Nginx server.
-
         :param hostname: nginx proxy server name.
         :type hostname: str
-
         :param ssl_port: Port number.
         :type ssl_port: str
-
         :param ssl_certificate_id: Id of ssl certificate.
         :type ssl_certificate_id: str
-
-        :param update_conf: if True updates app_servers_inc object from file 
+        :param update_conf: if True updates app_servers_inc object from file
             before performing ssl enabling.
         :type update_conf: bool
-
         :param reload_service: if True reloads nginx service after ssl enabling.
         :type reload_service: bool
-
-
         Example:
-
         Enable ssl on server with name `test.com`::
-
             api.nginx.enable_ssl('test.com', '443', '12345')
         """
         update_conf = _bool_from_scalr_str(update_conf)
@@ -1905,21 +1844,15 @@ class NginxAPI(BehaviorAPI):
     def disable_ssl(self, hostname, update_conf=True, reload_service=True):
         """
         Disables SSL support on Nginx server.
-
         :param hostname: nginx proxy server name.
         :type hostname: str
-
-        :param update_conf: if True updates app_servers_inc object from file 
+        :param update_conf: if True updates app_servers_inc object from file
             before performing ssl disabling.
         :type update_conf: bool
-
         :param reload_service: if True reloads nginx service after ssl disabling.
         :type reload_service: bool
-
         Example:
-
         Disable ssl on server with name `test.com`::
-
             api.nginx.disable_ssl('test.com')
         """
         update_conf = _bool_from_scalr_str(update_conf)
@@ -1958,4 +1891,3 @@ class NginxAPI(BehaviorAPI):
     @classmethod
     def do_check_software(cls, system_packages=None):
         return pkgmgr.check_any_software([['nginx'], ['nginx14']], system_packages)[0]
-

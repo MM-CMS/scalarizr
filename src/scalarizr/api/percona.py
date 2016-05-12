@@ -29,9 +29,9 @@ class PerconaAPI(mysql.MySQLAPI):
         requirements = None
         if os_name == 'ubuntu' and os_vers >= '14':
             requirements = [
-                ['percona-server-server-5.1', 'percona-server-client-5.1' ],
-                ['percona-server-server-5.5', 'percona-server-client-5.5' ],
-                ['percona-server-server-5.6', 'percona-server-client-5.6' ],
+                ['percona-server-server-5.1', 'percona-server-client-5.1'],
+                ['percona-server-server-5.5', 'percona-server-client-5.5'],
+                ['percona-server-server-5.6', 'percona-server-client-5.6'],
             ]
         elif linux.os.debian_family:
             requirements = [
@@ -41,7 +41,7 @@ class PerconaAPI(mysql.MySQLAPI):
         elif linux.os.redhat_family or linux.os.oracle_family:
             if os_vers >= '7' and not linux.os.amazon:
                 requirements = [
-                    ['Percona-Server-server-56', 'Percona-Server-client-56']                    
+                    ['Percona-Server-server-56', 'Percona-Server-client-56']
                 ]
             else:
                 requirements = [
@@ -70,4 +70,3 @@ class PerconaAPI(mysql.MySQLAPI):
             for error in errors:
                 if isinstance(error, cls):
                     raise error
-

@@ -1,0 +1,28 @@
+Origin: Intridea
+Label: scalr
+Suite: master
+Codename: master
+Date: Sat, 16 Mar 2013 14:03:10 UTC
+Architectures: all i386 amd64
+Description: Scalr packages
+MD5Sum:
+ 6af914b27956a4504e5001226ee36f6a           12272 Packages
+ 870081475b3f7f8d65289bda98785d01            3756 Packages.gz
+ 3daf0a198c293f90fc1966c52ae3a901            3731 Packages.bz2
+ d41d8cd98f00b204e9800998ecf8427e               0 Sources
+ 4a1aa95bb41b5e8191e3c833ee65c865              32 Sources.gz
+ 4059d198768f9f8dc9372dc1c54bc3c3              14 Sources.bz2
+SHA1:
+ 43ca567682da48595c1c15b740bde14e507d8dcf           12272 Packages
+ 858dc851a11a6e4271b4b5e97a0599d6e52907f2            3756 Packages.gz
+ bcd725f0b7732535c379b468a0e30c3fba223a91            3731 Packages.bz2
+ da39a3ee5e6b4b0d3255bfef95601890afd80709               0 Sources
+ bd4ce1c0b7994af0634733e24b2da042ac7655c7              32 Sources.gz
+ 64a543afbb5f4bf728636bdcbbe7a2ed0804adc2              14 Sources.bz2
+SHA256:
+ f74a3bd4cc2ccfab27d220efdd332eda1ab4e1915dbe2b0fb9f772486dea4f54           12272 Packages
+ ca1d8e480788e2b33cf2c7b688e1d1b5fba7658f07a0496acc6698e32851042f            3756 Packages.gz
+ 03998edde8934b362f31aec15d356f7799ef4294a60b85c2f3bf0b3764ed2d47            3731 Packages.bz2
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855               0 Sources
+ c9f8ae8107e0b9c9b379e5cbfb765c277303818aa4c4f825f66ca70d2d362db7              32 Sources.gz
+ d3dda84eb03b9738d118eb2be78e246106900493c0ae07819ad60815134a8058              14 Sources.bz2

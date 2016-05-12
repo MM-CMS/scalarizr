@@ -74,7 +74,9 @@ def filesystem(fstype=None):
     :return: Filesystem object
     :rtype: scalarizr.storage2.filesystems.FileSystem
     """
-    fstype = fstype or 'ext3'
+    if not fstype:
+        fstype = 'ntfs' if linux.os.windows else 'ext3'
+
     if not fstype in filesystem_types:
         try:
             __import__('scalarizr.storage2.filesystems.%s' % fstype)
@@ -150,6 +152,15 @@ class StorageError(linux.LinuxError):
 
 class NoOpError(StorageError):
     pass
+
+
+class Win32VolumeNotFound(StorageError):
+    def __init__(self, letter):
+        self.letter = letter
+
+    def __str__(self):
+        return 'Windows volume with drive letter "{}" not found'.format(self.letter)
+
 
 class VolumeNotExistsError(StorageError):
     def __str__(self):

@@ -7,12 +7,12 @@ Created on Dec 04, 2011
 import sys
 import string
 import os
-
+import functools
 from scalarizr.node import __node__
 from scalarizr.services.mysql2 import __mysql__
 
+from scalarizr import bollard
 from scalarizr import rpc, storage2
-from scalarizr.api import operation
 from scalarizr.services import mysql as mysql_svc
 from scalarizr.services import backup as backup_module
 from scalarizr.services import ServiceError
@@ -24,6 +24,47 @@ from scalarizr.linux import pkgmgr
 from scalarizr import exceptions
 from scalarizr.api import BehaviorAPI
 from scalarizr.api import SoftwareDependencyError
+
+
+def create_backup_callback(backup_conf, backup, task, meta):
+    if task['state'] == 'completed':
+        # For Scalr < 4.5.0
+        if backup_conf['type'] == 'mysqldump':
+            __node__.messaging.send('DbMsr_CreateBackupResult', {
+                'db_type': __mysql__.behavior,
+                'status': 'ok',
+                'backup_parts': task.result['parts']
+            })
+        else:
+            data = {
+                'restore': task.result
+            }
+            if backup_conf['type'] == 'snap_mysql':
+                data.update({
+                    'snapshot_config': task.result['snapshot'],
+                    'log_file': task.result['log_file'],
+                    'log_pos': task.result['log_pos'],
+                })
+            __node__.messaging.send('DbMsr_CreateDataBundleResult', {
+                'db_type': __mysql__.behavior,
+                'status': 'ok',
+                __mysql__.behavior: data
+            })
+    else:
+        # For Scalr < 4.5.0
+        msg_name = 'DbMsr_CreateBackupResult' \
+                if backup['type'] == 'mysqldump' else 'DbMsr_CreateDataBundleResult'
+        __node__.messaging.send(msg_name, {
+            'db_type': __mysql__.behavior,
+            'status': 'error',
+            'last_error': str(task.exception)
+        })
+
+
+def do_grow_callback(task, meta):
+    growed_vol = task.result
+    if growed_vol:
+        __mysql__['volume'] = growed_vol
 
 
 class MySQLAPI(BehaviorAPI):
@@ -46,7 +87,6 @@ class MySQLAPI(BehaviorAPI):
 
     def __init__(self):
         self._mysql_init = mysql_svc.MysqlInitScript()
-        self._op_api = operation.OperationAPI()
 
     @rpc.command_method
     def start_service(self):
@@ -117,6 +157,15 @@ class MySQLAPI(BehaviorAPI):
         """
         return self._mysql_init.status()
 
+    def do_grow(self, volume, growth):
+        vol = storage2.volume(volume)
+        self._mysql_init.stop('Growing data volume')
+        try:
+            growed_vol = vol.grow(**growth)
+            return dict(growed_vol)
+        finally:
+            self._mysql_init.start()
+
     @rpc.command_method
     def grow_volume(self, volume, growth, async=False):
         """
@@ -157,18 +206,17 @@ class MySQLAPI(BehaviorAPI):
         self._check_invalid(volume, 'volume', dict)
         self._check_empty(volume.get('id'), 'volume.id')
 
-        def do_grow(op):
-            vol = storage2.volume(volume)
-            self._mysql_init.stop('Growing data volume')
-            try:
-                growed_vol = vol.grow(**growth)
-                __mysql__['volume'] = dict(growed_vol)
-                return dict(growed_vol)
-            finally:
-                self._mysql_init.start()
+        task_name = 'api.{}.grow-volume'.format(os.path.basename(__file__).strip('.pyc'))
 
-        return self._op_api.run('mysql.grow-volume', do_grow, exclusive=True, async=async)
-
+        async_result = __node__['bollard'].apply_async(task_name,
+            args=(volume, growth),
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': do_grow_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
     def _check_invalid(self, param, name, type_):
         assert isinstance(param, type_), \
@@ -230,82 +278,44 @@ class MySQLAPI(BehaviorAPI):
             except ServiceError:
                 return {'slave': {'status': 'down'}}
 
+    def do_backup(self, backup_conf):
+        bak = backup_module.backup(**backup_conf)
+        restore = bak.run()
+        return dict(restore)
 
     @rpc.command_method
     def create_backup(self, backup=None, async=True):
         """
         Creates a new backup of every available database and uploads gzipped data to the cloud storage.
         """
-        def do_backup(op, backup_conf=None):
-            try:
-                purpose = '{0}-{1}'.format(
-                        __mysql__.behavior, 
-                        'master' if int(__mysql__.replication_master) == 1 else 'slave')
-                backup = {
-                    'type': 'mysqldump',
-                    'cloudfs_dir': __node__.platform.scalrfs.backups('mysql'),
-                    'description': 'MySQL backup (farm: {0} role: {1})'.format(
-                            __node__.farm_id, __node__.role_name),
-                    'tags': build_tags(purpose, 'active')
-                }
-                backup.update(backup_conf or {})
+        purpose = '{0}-{1}'.format(
+                __mysql__.behavior,
+                'master' if int(__mysql__.replication_master) == 1 else 'slave')
+        backup_conf = {
+            'type': 'mysqldump',
+            'cloudfs_dir': __node__.platform.scalrfs.backups('mysql'),
+            'description': 'MySQL backup (farm: {0} role: {1})'.format(
+                    __node__.farm_id, __node__.role_name),
+            'tags': build_tags(purpose, 'active')
+        }
 
-                if backup['type'] == 'snap_mysql':
-                    backup['description'].replace('backup', 'data bundle')
-                    backup['volume'] = __mysql__.volume
+        backup_conf.update(backup or {})
 
-                bak = op.data['bak'] = backup_module.backup(**backup)
-                try:
-                    restore = bak.run()
-                finally:
-                    del op.data['bak']
+        if backup_conf['type'] == 'snap_mysql':
+            backup_conf['description'].replace('backup', 'data bundle')
+            backup_conf['volume'] = dict(__mysql__['volume'])
 
-                # For Scalr < 4.5.0
-                if bak.type == 'mysqldump':
-                    __node__.messaging.send('DbMsr_CreateBackupResult', {
-                        'db_type': __mysql__.behavior,
-                        'status': 'ok',
-                        'backup_parts': restore.parts
-                    })
-                else:
-                    data = {
-                        'restore': dict(restore)
-                    }
-                    if backup["type"] == 'snap_mysql':
-                        data.update({
-                            'snapshot_config': dict(restore.snapshot),
-                            'log_file': restore.log_file,
-                            'log_pos': restore.log_pos,
-                        })
-                    __node__.messaging.send('DbMsr_CreateDataBundleResult', {
-                        'db_type': __mysql__.behavior,
-                        'status': 'ok',
-                        __mysql__.behavior: data
-                    })
- 
-                return dict(restore)
-            except:
-                # For Scalr < 4.5.0
-                c, e, t = sys.exc_info()
-                msg_name = 'DbMsr_CreateBackupResult' \
-                            if backup['type'] == 'mysqldump' else \
-                            'DbMsr_CreateDataBundleResult'
-                __node__.messaging.send(msg_name, {
-                    'db_type': __mysql__.behavior,
-                    'status': 'error',
-                    'last_error': str(e)
-                })
-                raise c, e, t
+        _create_backup_callback = functools.partial(create_backup_callback, backup_conf, backup)
 
-        def cancel_backup(op):
-            bak = op.data.get('bak')
-            if bak:
-                bak.kill()
-
-        return self._op_api.run('mysql.create-backup', 
-                func=do_backup, cancel_func=cancel_backup, 
-                func_kwds={'backup_conf': backup},
-                async=async, exclusive=True)
+        async_result = __node__['bollard'].apply_async('api.mysql.create-backup',
+            args=(backup_conf,),
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': _create_backup_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
     @classmethod
     def do_check_software(cls, system_packages=None):
@@ -346,3 +356,12 @@ class MySQLAPI(BehaviorAPI):
                 if isinstance(error, cls):
                     raise error
 
+
+@bollard.task(name='api.mysql.grow-volume', exclusive=True)
+def grow_volume(*args, **kwds):
+    return MySQLAPI().do_grow(*args, **kwds)
+
+
+@bollard.task(name='api.mysql.create-backup', exclusive=True)
+def create_backup(*args, **kwds):
+    return MySQLAPI().do_backup(*args, **kwds)

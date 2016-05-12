@@ -15,7 +15,7 @@ import itertools
 
 
 from scalarizr import storage2, util
-from scalarizr.linux import mdadm, lvm2, coreutils, os as os_detect
+from scalarizr.linux import mdadm, mount, lvm2, coreutils, os as os_detect
 from scalarizr.storage2.volumes import base
 
 
@@ -213,6 +213,13 @@ class RaidVolume(base.Volume):
             util.wait_until(lambda: os.path.exists(self.device),
                                     timeout=120, logger=LOG,
                                     error_text='Logical volume %s not found' % self.device)
+
+            if self.mpoint:
+                # SCALARIZR-1929 raid wasn't auto-mounted after reboot.
+                # XXX: needs investigation, code below is a hotfix.
+                fstab = mount.fstab()
+                if self.mpoint in fstab:
+                    self.mount()
 
         else:
             raid_device = mdadm.findname()

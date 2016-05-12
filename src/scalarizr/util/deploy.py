@@ -102,9 +102,28 @@ class GitSource(Source):
 
     def __init__(self, url, ssh_private_key=None, executable=None):
         self._logger = logging.getLogger(__name__)
-        self.url = url
         self.executable = executable or self.EXECUTABLE
         self.private_key = ssh_private_key
+        # [SCALARIZR-1990] cannot use URLs like scheme://uri@branch in git clone etc.
+        self.url, self.branch = self._split_git_url(url)
+
+
+    def _split_git_url(self, url):
+        """
+        https://github.com/Scalr/pecha.git  - master
+        git@github.com:Scalr/pecha.git - master
+        https://github.com/Scalr/pecha.git@stable - stable
+        git@github.com:Scalr/pecha.git@stable - stable
+
+        :return: [Str,Str]
+        """
+        if '@' not in url:
+            return url, None
+
+        parts = url.strip().split('@')
+        if len(parts) == 2 and parts[0] == 'git':
+            return url, None
+        return '@'.join(parts[:-1]), parts[-1]
 
 
     def update(self, workdir):
@@ -142,7 +161,7 @@ class GitSource(Source):
                 origin_url = system2(('git', 'config', '--get', 'remote.origin.url'), cwd=workdir, raise_exc=False)[0]
                 if origin_url.strip() != self.url.strip():
                     self._logger.info('%s is not origin of %s (%s is)', self.url, workdir, origin_url)
-                    self._logger.info('Remove all files in %s and checkout from %s', workdir, self.url )
+                    self._logger.info('Remove all files in %s and checkout from %s', workdir, self.url)
                     shutil.rmtree(workdir)
                     os.mkdir(workdir)
 
@@ -156,6 +175,11 @@ class GitSource(Source):
 
             if ret_code:
                 raise Exception('Git failed to clone repository. %s' % out)
+
+            if self.branch:
+                o, _, rc = system2(('git', 'checkout', self.branch), env=env, cwd=workdir)
+                if rc:
+                    raise Exception("Git failed to checkout branch '%s'. %s" % (self.branch, o))
 
             log.info('Successfully deployed %s from %s', workdir, self.url)
         finally:

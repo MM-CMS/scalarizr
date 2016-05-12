@@ -8,11 +8,10 @@ import os
 import re
 import sys
 import logging
-import time
-import tarfile
 import tempfile
 import shutil
 
+from scalarizr import bollard
 from scalarizr.bus import bus
 from scalarizr.node import __node__
 from scalarizr.util import PopenError, system2
@@ -24,10 +23,9 @@ from scalarizr.services import backup
 from scalarizr.config import BuiltinBehaviours
 from scalarizr.handlers import DbMsrMessages, HandlerError
 from scalarizr.handlers import transfer_result_to_backup_result
-from scalarizr.api import operation
 from scalarizr.linux.coreutils import chown_r
 from scalarizr.services.postgresql import PSQL, PG_DUMP, SU_EXEC
-from scalarizr.storage2.cloudfs import LargeTransfer
+from scalarizr.storage2 import largetransfer
 from scalarizr.util import Singleton
 from scalarizr.linux import pkgmgr
 from scalarizr import exceptions
@@ -43,6 +41,44 @@ STORAGE_PATH = "/mnt/pgstorage"
 OPT_SNAPSHOT_CNF = 'snapshot_config'
 OPT_REPLICATION_MASTER = postgresql_svc.OPT_REPLICATION_MASTER
 __postgresql__ = postgresql_svc.__postgresql__
+
+
+def grow_volume_callback(task, meta):
+    if task['state'] == 'completed':
+        __postgresql__['volume'] = task.result
+
+
+def create_databundle_callback(task, meta):
+    if task['state'] == 'completed':
+        snap = task.result
+        bus.fire('%s_data_bundle' % BEHAVIOUR, snapshot_id=snap['id'])
+        used_size = int(system2(('df', '-P', '--block-size=M',
+            STORAGE_PATH))[0].split('\n')[1].split()[2][:-1])
+        msg_data = {
+            'db_type': BEHAVIOUR,
+            'status': 'ok',
+            'used_size': '%.3f' % (float(used_size) / 1000,),
+            BEHAVIOUR: {OPT_SNAPSHOT_CNF: snap}
+        }
+        __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT, msg_data)
+    else:
+        __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT,
+            dict(db_type=BEHAVIOUR,
+                status='error',
+                last_error=str(task.exception)))
+
+
+def create_backup_callback(task, meta):
+    if task['state'] == 'completed':
+        __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT,
+            dict(db_type=BEHAVIOUR,
+                status='ok',
+                backup_parts=task.result))
+    else:
+        __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT,
+            dict(db_type=BEHAVIOUR,
+                status='error',
+                last_error=str(task.exception)))
 
 
 class PostgreSQLAPI(BehaviorAPI):
@@ -65,8 +101,7 @@ class PostgreSQLAPI(BehaviorAPI):
     '''
 
     def __init__(self):
-        self._op_api = operation.OperationAPI()
-        self.postgresql = postgresql_svc.PostgreSql()  #?
+        self.postgresql = postgresql_svc.PostgreSql()  # ?
         self.service = postgresql_svc.PgSQLInitScript()
 
     @rpc.command_method
@@ -231,6 +266,18 @@ class PostgreSQLAPI(BehaviorAPI):
         return {'slave': {'status': 'up',
                           'xlog_delay': query_result['xlog_delay']}}
 
+    def do_databundle(self, volume):
+        LOG.info("Creating PostgreSQL data bundle")
+        volume = storage2.volume(volume)
+        if volume.type == 'eph':
+            volume.ensure()
+        backup_obj = backup.backup(type='snap_postgresql',
+                                   volume=volume,
+                                   tags=volume.tags)
+        restore = backup_obj.run()
+        snap = restore.snapshot
+
+        return dict(snap)
 
     @rpc.command_method
     def create_databundle(self, async=True):
@@ -238,48 +285,75 @@ class PostgreSQLAPI(BehaviorAPI):
         Creates a new data bundle of /mnt/pgstrage.
         """
 
-        def do_databundle(op):
+        bus.fire('before_postgresql_data_bundle')
+
+        async_result = __node__['bollard'].apply_async('api.postgresql.create-databundle',
+            args=(dict(__postgresql__['volume']),),
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': create_databundle_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
+
+    def do_backup(self):
+        tmpdir = None
+        dumps = []
+        tmp_path = os.path.join(__postgresql__['storage_dir'], 'tmp')
+        try:
+            # Get databases list
+            psql = PSQL(user=self.postgresql.root_user.name)
+            databases = psql.list_pg_databases()
+            if 'template0' in databases:
+                databases.remove('template0')
+
+            if not os.path.exists(tmp_path):
+                os.makedirs(tmp_path)
+
+            # Dump all databases
+            LOG.info("Dumping all databases")
+            tmpdir = tempfile.mkdtemp(dir=tmp_path)
+            chown_r(tmpdir, self.postgresql.root_user.name)
+
+            def _single_backup(db_name):
+                dump_path = tmpdir + os.sep + db_name + '.sql'
+                pg_args = '%s %s --no-privileges -f %s' % (PG_DUMP, db_name, dump_path)
+                su_args = [SU_EXEC, '-', self.postgresql.root_user.name, '-c', pg_args]
+                err = system2(su_args)[1]
+                if err:
+                    raise HandlerError('Error while dumping database %s: %s' % (db_name, err))  # ?
+                dumps.append(dump_path)
+
+            for db_name in databases:
+                _single_backup(db_name)
+
+            cloud_storage_path = __node__.platform.scalrfs.backups(BEHAVIOUR)
+
+            suffix = 'master' if int(__postgresql__[OPT_REPLICATION_MASTER]) else 'slave'
+            backup_tags = {'scalr-purpose': 'postgresql-%s' % suffix}
+
+            LOG.info("Uploading backup to %s with tags %s" % (cloud_storage_path, backup_tags))
+
+            def progress_cb(progress):
+                LOG.debug('Uploading %s bytes' % progress)
+
+            uploader = largetransfer.Upload(dumps, cloud_storage_path, progress_cb=progress_cb)
             try:
-                bus.fire('before_postgresql_data_bundle')
-                LOG.info("Creating PostgreSQL data bundle")
-                backup_obj = backup.backup(type='snap_postgresql',
-                                           volume=__postgresql__['volume'],
-                                           tags=__postgresql__['volume'].tags)
-                restore = backup_obj.run()
-                snap = restore.snapshot
+                uploader.apply_async()
+                uploader.join()
+                manifest = uploader.manifest
 
+                LOG.info("Postgresql backup uploaded to cloud storage under %s", cloud_storage_path)
+                LOG.debug(manifest.data)
 
-                used_size = int(system2(('df', '-P', '--block-size=M', STORAGE_PATH))[0].split('\n')[1].split()[2][:-1])
-                bus.fire('postgresql_data_bundle', snapshot_id=snap.id)
-
-                # Notify scalr
-                msg_data = {
-                    'db_type': BEHAVIOUR,
-                    'status': 'ok',
-                    'used_size' : '%.3f' % (float(used_size) / 1000,),
-                    BEHAVIOUR: {OPT_SNAPSHOT_CNF: dict(snap)}
-                }
-
-                __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT,
-                                        msg_data)
-
-                return restore
-
-            except (Exception, BaseException), e:
-                LOG.exception(e)
-                
-                # Notify Scalr about error
-                __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_DATA_BUNDLE_RESULT, 
-                                        dict(db_type=BEHAVIOUR,
-                                             status='error',
-                                             last_error=str(e)))
-
-        return self._op_api.run('postgresql.create-databundle', 
-                                func=do_databundle,
-                                func_kwds={},
-                                async=async,
-                                exclusive=True)
-
+                return transfer_result_to_backup_result(manifest)
+            except:
+                uploader.terminate()
+                raise
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
     @rpc.command_method
     def create_backup(self, async=True):
@@ -290,77 +364,15 @@ class PostgreSQLAPI(BehaviorAPI):
             System database 'template0' is not included in backup.
         """
 
-        def do_backup(op):
-            tmpdir = None
-            dumps = []
-            tmp_path = os.path.join(__postgresql__['storage_dir'], 'tmp')
-            try:
-                # Get databases list
-                psql = PSQL(user=self.postgresql.root_user.name)
-                databases = psql.list_pg_databases()
-                if 'template0' in databases:
-                    databases.remove('template0')
-                
-                if not os.path.exists(tmp_path):
-                    os.makedirs(tmp_path)
+        async_result = __node__['bollard'].apply_async('api.postgresql.create-backup',
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': create_backup_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-                # Dump all databases
-                LOG.info("Dumping all databases")
-                tmpdir = tempfile.mkdtemp(dir=tmp_path)       
-                chown_r(tmpdir, self.postgresql.root_user.name)
-
-                def _single_backup(db_name):
-                    dump_path = tmpdir + os.sep + db_name + '.sql'
-                    pg_args = '%s %s --no-privileges -f %s' % (PG_DUMP, db_name, dump_path)
-                    su_args = [SU_EXEC, '-', self.postgresql.root_user.name, '-c', pg_args]
-                    err = system2(su_args)[1]
-                    if err:
-                        raise HandlerError('Error while dumping database %s: %s' % (db_name, err))  #?
-                    dumps.append(dump_path)
-
-
-                for db_name in databases:
-                    _single_backup(db_name)
-
-                cloud_storage_path = __node__.platform.scalrfs.backups(BEHAVIOUR)
-
-                suffix = 'master' if int(__postgresql__[OPT_REPLICATION_MASTER]) else 'slave'
-                backup_tags = {'scalr-purpose': 'postgresql-%s' % suffix}
-
-                LOG.info("Uploading backup to %s with tags %s" % (cloud_storage_path, backup_tags))
-                trn = LargeTransfer(dumps, cloud_storage_path, tags=backup_tags)
-                manifest = trn.run()
-                LOG.info("Postgresql backup uploaded to cloud storage under %s", cloud_storage_path)
-                    
-                # Notify Scalr
-                result = transfer_result_to_backup_result(manifest)
-                __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT,
-                                        dict(db_type=BEHAVIOUR,
-                                             status='ok',
-                                             backup_parts=result))
-
-                return result
-                            
-            except (Exception, BaseException), e:
-                LOG.exception(e)
-                
-                # Notify Scalr about error
-                __node__.messaging.send(DbMsrMessages.DBMSR_CREATE_BACKUP_RESULT,
-                                        dict(db_type=BEHAVIOUR,
-                                             status='error',
-                                             last_error=str(e)))
-                
-            finally:
-                if tmpdir:
-                    shutil.rmtree(tmpdir, ignore_errors=True)
-
-        return self._op_api.run('postgresql.create-backup', 
-                                func=do_backup,
-                                func_kwds={},
-                                async=async,
-                                exclusive=True)
-
-                            
     @classmethod
     def do_check_software(cls, system_packages=None):
         os_name = linux.os['name'].lower()
@@ -431,6 +443,15 @@ class PostgreSQLAPI(BehaviorAPI):
                 if isinstance(error, cls):
                     raise error
 
+    def do_grow(self, volume, growth):
+        vol = storage2.volume(volume)
+        self.stop_service(reason='Growing data volume')
+        try:
+            growed_vol = vol.grow(**growth)
+            return dict(growed_vol)
+        finally:
+            self.start_service()
+
     @rpc.command_method
     def grow_volume(self, volume, growth, async=False):
         """
@@ -472,15 +493,27 @@ class PostgreSQLAPI(BehaviorAPI):
         assert isinstance(volume, dict), "volume configuration is invalid, 'dict' type expected"
         assert volume.get('id'), "volume.id can't be blank"
 
-        def do_grow(op):
-            vol = storage2.volume(volume)
-            self.stop_service(reason='Growing data volume')
-            try:
-                grown_vol = vol.grow(**growth)
-                postgresql_svc.__postgresql__['volume'] = dict(grown_vol)
-                return dict(grown_vol)
-            finally:
-                self.start_service()
+        async_result = __node__['bollard'].apply_async('api.postgresql.grow-volume',
+            args=(volume, growth),
+            soft_timeout=(1 * 24) * 3600,
+            hard_timeout=(1 * 24 + 1) * 3600,
+            callbacks={'task.pull': grow_volume_callback})
+        if async:
+            return async_result.task_id
+        else:
+            return async_result.get()
 
-        return self._op_api.run('postgresql.grow-volume', do_grow, exclusive=True, async=async)
 
+@bollard.task(name='api.postgresql.grow-volume', exclusive=True)
+def grow_volume(*args, **kwds):
+    return PostgreSQLAPI().do_grow(*args, **kwds)
+
+
+@bollard.task(name='api.postgresql.create-backup', exclusive=True)
+def create_backup(*args, **kwds):
+    return PostgreSQLAPI().do_backup(*args, **kwds)
+
+
+@bollard.task(name='api.postgresql.create-databundle', exclusive=True)
+def create_databundle(*args, **kwds):
+    return PostgreSQLAPI().do_databundle(*args, **kwds)

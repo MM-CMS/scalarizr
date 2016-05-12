@@ -48,7 +48,7 @@ class RebundleLogHandler(logging.Handler):
     def emit(self, record):
         msg = self._msg_service.new_message(Messages.REBUNDLE_LOG, body=dict(
                 bundle_task_id = self.bundle_task_id,
-                message = str(record.msg) % record.args if record.args else str(record.msg)
+                message = record.msg % record.args if record.args else record.msg
         ))
         self._msg_service.get_producer().send(Queues.LOG, msg)
 
@@ -127,11 +127,7 @@ class RebundleHandler(Handler):
             # Do actual rebundle work
             cnf = bus.cnf
             saved_state = cnf.state
-            try:
-                cnf.state = ScalarizrState.REBUNDLING
-                image_id = self.rebundle()
-            finally:
-                cnf.state = saved_state
+            image_id = self.rebundle()
 
             # Creating message
             result = dict(
@@ -186,7 +182,8 @@ class RebundleHandler(Handler):
                         coreutils.truncate(filename)
                     except OSError, e:
                         self._logger.error("Cannot truncate file '%s'. %s", filename, e)
-            shutil.rmtree(os.path.join(logs_path, 'scalarizr/scripting'))
+            if os.path.exists(os.path.join(logs_path, 'scalarizr/scripting')):
+                shutil.rmtree(os.path.join(logs_path, 'scalarizr/scripting'))
 
         # Cleanup users homes
         LOG.debug('Removing users activity')

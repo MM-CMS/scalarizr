@@ -1,5 +1,6 @@
 
 import sys
+import re
 
 try:
     import httplib2
@@ -10,31 +11,34 @@ except ImportError:
 # Core
 from scalarizr import __version__
 from scalarizr import config, rpc, linux, api
+from scalarizr import bollard
 from scalarizr.node import __node__
 from scalarizr.linux import coreutils, mount
-
 from scalarizr.bus import bus
 from scalarizr.config import CmdLineIni, ScalarizrCnf, ScalarizrState, ScalarizrOptions, STATE
 from scalarizr.storage import Storage
 from scalarizr.handlers import MessageListener
 from scalarizr.messaging import MessageServiceFactory, MessageService, MessageConsumer, Queues, Messages
-from scalarizr.messaging.p2p import P2pConfigOptions
 from scalarizr.platform import PlatformFactory, UserDataOptions
-from scalarizr.queryenv import QueryEnvService
+from scalarizr.queryenv import new_queryenv
 from scalarizr.api.binding import jsonrpc_http
-
+from scalarizr.util import cryptotool
+from scalarizr.util import metadata
 from scalarizr.linux import pkgmgr
 if linux.os.windows:
-    import _winreg as winreg
+    import win32com
+    import win32com.client
+    from scalarizr.util import wintool
 
 if linux.os.windows:
     import win32timezone as os_time
 else:
     from datetime import datetime as os_time
+import psutil
+import requests
 
 # Utils
 from scalarizr import util
-from scalarizr.util import metadata
 from scalarizr.util import initdv2, log, PeriodicalExecutor
 from scalarizr.util import SqliteLocalObject, daemonize, system2, firstmatched, format_size
 from scalarizr.util import wait_until, sqlite_server
@@ -42,6 +46,8 @@ from scalarizr.util.flag import Flag
 
 # Stdlibs
 import cStringIO
+import json
+import socket
 import logging
 import logging.config
 import os, shutil, time, uuid
@@ -52,6 +58,7 @@ from urlparse import urlparse, urlunparse
 import urllib
 import urllib2
 import pprint
+import binascii
 import select
 import wsgiref.simple_server
 import SocketServer
@@ -63,7 +70,7 @@ if not linux.os.windows:
     import ctypes
     libc = ctypes.CDLL('libc.so.6')
 
-    def res_init():
+    def libc_res_init():
         return libc.__res_init()
 
 
@@ -76,25 +83,15 @@ class NotConfiguredError(BaseException):
 
 EMBED_SNMPD = True
 NET_SNMPD = False
-
 SNMP_RESTART_DELAY = 5 # Seconds
 SNMP_POLL_INTERVAL = 10 # Seconds
-
-if linux.os.windows_family:
-    from scalarizr.util import reg_value
-    INSTALL_DIR = reg_value('InstallDir')
-else:
-    INSTALL_DIR = '/'
-
-PID_FILE = os.path.join(INSTALL_DIR, 'var', 'run', 'scalarizr.pid')
-
-LOGFILES_BASEPATH = os.path.join(INSTALL_DIR, 'var', 'log')
-LOG_PATH = os.path.join(LOGFILES_BASEPATH, 'scalarizr.log')
-LOG_DEBUG_PATH = os.path.join(LOGFILES_BASEPATH, 'scalarizr_debug.log')
+PID_FILE = os.path.join(__node__['run_dir'], 'scalarizr.pid')
+LOG_PATH = os.path.join(__node__['log_dir'], 'scalarizr.log')
+LOG_DEBUG_PATH = os.path.join(__node__['log_dir'], 'scalarizr_debug.log')
 
 LOGGING_CONFIG = r'''
 [loggers]
-keys=root,scalarizr
+keys=root,scalarizr,agent,common
 
 [handlers]
 keys=console,user_log,debug_log
@@ -109,6 +106,18 @@ handlers=console,user_log,debug_log
 [logger_scalarizr]
 level=DEBUG
 qualname=scalarizr
+handlers=console,user_log,debug_log
+propagate=0
+
+[logger_agent]
+level=DEBUG
+qualname=agent
+handlers=console,user_log,debug_log
+propagate=0
+
+[logger_common]
+level=DEBUG
+qualname=common
 handlers=console,user_log,debug_log
 propagate=0
 
@@ -153,14 +162,12 @@ Scalarizr main process PID
 
 _logging_configured = False
 
-_meta = None
-
 
 class ScalarizrInitScript(initdv2.ParametrizedInitScript):
     def __init__(self):
-        initdv2.ParametrizedInitScript.__init__(self, 
-            'scalarizr', 
-            '/etc/init.d/scalarizr', 
+        initdv2.ParametrizedInitScript.__init__(self,
+            'scalarizr',
+            '/etc/init.d/scalarizr',
             socks=[initdv2.SockParam(8013)]
         )
 
@@ -185,15 +192,12 @@ class ScalrUpdClientScript(initdv2.Daemon):
             self.start()
 
 def _init():
-    global _meta
-    _meta = metadata.Metadata()
-
     optparser = bus.optparser
     bus.base_path = os.path.realpath(os.path.dirname(__file__) + "/../..")
-    
+
     _init_logging()
-    logger = logging.getLogger(__name__)    
-    
+    logger = logging.getLogger(__name__)
+
     # Initialize configuration
     if not bus.etc_path:
         bus.etc_path = __node__['etc_dir']
@@ -201,11 +205,11 @@ def _init():
     if not os.path.exists(cnf.private_path()):
         os.makedirs(cnf.private_path())
     bus.cnf = cnf
-    
+
     # Find shared resources dir
     if not bus.share_path:
         bus.share_path = __node__['share_dir']
-    
+
     # Registering in init.d
     initdv2.explore("scalarizr", ScalarizrInitScript)
 
@@ -213,61 +217,50 @@ def _init():
 DB_NAME = 'db.sqlite'
 DB_SCRIPT = 'db.sql'
 
-def _db_connect(file=None):
+def _db_connect(db_file=None):
     logger = logging.getLogger(__name__)
     cnf = bus.cnf
-    file = file or cnf.private_path(DB_NAME)
-    logger.debug("Open SQLite database (file: %s)" % (file))    
-    
-    conn = sqlite.connect(file, 5.0)
+    db_file = db_file or cnf.private_path(DB_NAME)
+    logger.debug("Open SQLite database (file: %s)", db_file)
+
+    conn = sqlite.connect(db_file, 5.0)
     conn.row_factory = sqlite.Row
     conn.text_factory = sqlite.OptimizedUnicode
-    #conn.executescript("PRAGMA journal_mode=OFF;")    
     return conn
 
-def _init_db(file=None):
-    logger = logging.getLogger(__name__)    
+def _init_db(db_file=None):
+    logger = logging.getLogger(__name__)
     cnf = bus.cnf
 
-    # Check that database exists (after rebundle for example)    
+    # Check that database exists (after rebundle for example)
     try:
-        db_file = file or cnf.private_path(DB_NAME)
+        db_file = db_file or cnf.private_path(DB_NAME)
         if not os.path.exists(db_file) or not os.stat(db_file).st_size:
             logger.debug("Database doesn't exist, creating new one from script")
-            _create_db(file)
+            _create_db(db_file)
         os.chmod(db_file, 0600)
 
-        # XXX(marat) Added here cause postinst script sometimes failed and we get
-        # OperationalError: table p2pmessage has no column named format
-        conn = _db_connect()
-        cur = conn.cursor()
-        cur.execute('pragma table_info(p2p_message)')
-        if not any(filter(lambda row: row[1] == 'format', cur.fetchall())):
-            cur.execute("alter table p2p_message add column format TEXT default 'xml'")
-            conn.commit()
-        cur.close()
-        conn.close()
     except sqlite.OperationalError, e:
         if 'database schema has changed' not in str(e):
             # This caused by UpdateClient paralled startup.
-            #  
-            # By initial plan, Scalarizr should be started by UpdateClient, 
-            # but old Ubuntu 10.04 roles don't have UpdateClient. 
-            # Whereas it's installed during migration, but scalr-upd-client init script added to rc2.d 
+            #
+            # By initial plan, Scalarizr should be started by UpdateClient,
+            # but old Ubuntu 10.04 roles don't have UpdateClient.
+            # Whereas it's installed during migration, but scalr-upd-client init script added to rc2.d
             # in run time never executed and migration to latest Scalarizr fails.
             raise
 
-        
+
     # Configure database connection pool
     t = sqlite_server.SQLiteServerThread(_db_connect)
     t.setDaemon(True)
     t.start()
     sqlite_server.wait_for_server_thread(t)
     bus.db = t.connection
-    
 
-    
-def _create_db(db_file=None, script_file=None):    
+
+
+def _create_db(db_file=None, script_file=None):
     logger = logging.getLogger(__name__)
     #conn = bus.db
     #logger.debug('conn: %s', conn)
@@ -275,25 +268,28 @@ def _create_db(db_file=None, script_file=None):
     conn.executescript(open(script_file or os.path.join(bus.share_path, DB_SCRIPT)).read())
     conn.commit()
     conn.close()
-    
+
     #conn.commit()
     if linux.os['family'] != 'Windows':
         system2('sync', shell=True)
 
 def _init_logging():
     optparser = bus.optparser
-    
+
     #logging.config.dictConfig(LOGGING_CONFIG)
     logging.config.fileConfig(cStringIO.StringIO(LOGGING_CONFIG))
     globals()['_logging_configured'] = True
     logger = logging.getLogger(__name__)
-    
+
     # During server import user must see all scalarizr general activity in his terminal
-    # Change console loggel level from DEBUG to INFO  
+    # Change console loggel level from DEBUG to INFO
     if optparser and optparser.values.import_server:
         for hdlr in logging.getLogger('scalarizr').handlers:
             if isinstance(hdlr, logging.StreamHandler) and hdlr.stream == sys.stderr:
                 hdlr.setLevel(logging.INFO)
+
+    logger = logging.getLogger('requests.packages.urllib3.connectionpool')
+    logger.addFilter(util.InfoToDebugFilter())
 
 
 def _init_environ():
@@ -307,11 +303,11 @@ def _init_environ():
 def _init_platform():
     logger = logging.getLogger(__name__)
     cnf = bus.cnf; ini = cnf.rawini
-    
+
     platform_name = ini.get('general', 'platform')
 
     if linux.os['name'] == 'RedHat' and platform_name == 'ec2':
-        # Enable RedHat subscription 
+        # Enable RedHat subscription
         logger.debug('Enable RedHat subscription')
         urllib.urlretrieve('http://169.254.169.254/latest/dynamic/instance-identity/document')
 
@@ -328,28 +324,28 @@ def _init_platform():
 
 def _apply_user_data(from_scalr=True):
     logger = logging.getLogger(__name__)
-    logger.debug('Applying user-data to configuration')    
+    logger.debug('Applying user-data to configuration')
     if from_scalr:
         queryenv = bus.queryenv_service
         user_data = queryenv.get_server_user_data()
         logger.debug('User-data (QueryEnv):\n%s', pprint.pformat(user_data))
     else:
-        user_data = _meta.user_data()
+        user_data = metadata.user_data()
         logger.debug('User-data (Instance):\n%s', pprint.pformat(user_data))
- 
+
     def g(key):
         return user_data.get(key, '')
-    
+
     updates = dict(
         general={
-            'platform': g('platform'),
+            'platform': g('platform') or 'ec2',
             'server_id' : g(UserDataOptions.SERVER_ID),
             'server_index': g('server_index'),
             'role_name' : g(UserDataOptions.ROLE_NAME),
             'queryenv_url' : g(UserDataOptions.QUERYENV_URL),
             'cloud_storage_path': g(UserDataOptions.CLOUD_STORAGE_PATH),
             'farm_role_id' : g(UserDataOptions.FARMROLE_ID),
-            'env_id' : g(UserDataOptions.ENV_ID), 
+            'env_id' : g(UserDataOptions.ENV_ID),
             'farm_id' : g(UserDataOptions.FARM_ID),
             'role_id' : g(UserDataOptions.ROLE_ID),
             'region' : g(UserDataOptions.REGION),
@@ -365,7 +361,7 @@ def _apply_user_data(from_scalr=True):
         if behaviour == 'base':
             behaviour = ''
         updates['general']['behaviour'] = behaviour
-        
+
     cnf = bus.cnf
     if not cnf.rawini.has_option('general', 'scalr_id') and \
             bus.scalr_version >= (3, 5, 7):
@@ -376,7 +372,7 @@ def _apply_user_data(from_scalr=True):
 
     cnf.update_ini('config.ini', updates)
     cnf.write_key(cnf.DEFAULT_KEY, g(UserDataOptions.CRYPTO_KEY))
-    
+
     logger.debug('Reloading configuration after user-data applying')
     cnf.bootstrap(force_reload=True)
 
@@ -394,11 +390,11 @@ def _detect_scalr_version():
             return (2, 1)
     return (2, 0)
 
-    
+
 def init_script():
     _init()
     _init_db()
-    
+
     cnf = bus.cnf
     cnf.bootstrap()
     ini = cnf.rawini
@@ -407,17 +403,17 @@ def init_script():
     for hd in list(szr_logger.handlers):
         if 'MessagingHandler' in hd.__class__.__name__:
             szr_logger.handlers.remove(hd)
-    
+
     logger = logging.getLogger(__name__)
     logger.debug("Initialize script messaging")
 
-    # Script producer url is scalarizr consumer url. 
+    # Script producer url is scalarizr consumer url.
     # Script can't handle any messages by himself. Leave consumer url blank
-    adapter = ini.get(config.SECT_MESSAGING, config.OPT_ADAPTER)    
+    adapter = ini.get(config.SECT_MESSAGING, config.OPT_ADAPTER)
     kwargs = dict(ini.items("messaging_" + adapter))
-    kwargs[P2pConfigOptions.SERVER_ID] = ini.get(config.SECT_GENERAL, config.OPT_SERVER_ID)
-    kwargs[P2pConfigOptions.CRYPTO_KEY_PATH] = cnf.key_path(cnf.DEFAULT_KEY)
-    kwargs[P2pConfigOptions.PRODUCER_URL] = kwargs[P2pConfigOptions.CONSUMER_URL]
+    kwargs['server_id'] = ini.get(config.SECT_GENERAL, config.OPT_SERVER_ID)
+    kwargs['crypto_key_path'] = cnf.key_path(cnf.DEFAULT_KEY)
+    kwargs['producer_url'] = kwargs['consumer_url']
     
     factory = MessageServiceFactory()        
     msg_service = factory.new_service(adapter, **kwargs)
@@ -428,7 +424,7 @@ def _cleanup_after_rebundle():
     cnf = bus.cnf
     pl = bus.platform
     logger = logging.getLogger(__name__)
-    
+
     if os.path.exists('/etc/chef/client.pem'):
         os.remove('/etc/chef/client.pem')
     if os.path.exists('/etc/chef/client.rb'):
@@ -436,11 +432,25 @@ def _cleanup_after_rebundle():
 
     # remove storage devices from fstab
     if not linux.os.windows_family:
+        def remove_systemd_generated_mount_unit(mpoint):
+            unit_name = '{}.mount'.format(mpoint.replace('/', '-')[1:])
+            logger.debug('Removing systemd runtime unit %s', unit_name)
+            coreutils.remove('/run/systemd/generator/local-fs.target.wants/{}'.format(unit_name))
+            coreutils.remove('/run/systemd/generator/{}'.format(unit_name))
         fstab = mount.fstab()
+        should_reload_systemd = False
         for entry in fstab:
             if 'comment=scalr' in entry.options:
+                logger.debug('Removing %s from fstab', entry.device)
                 fstab.remove(entry.device)
-    
+                if linux.os.systemd_init:
+                    remove_systemd_generated_mount_unit(entry.mpoint)
+                    should_reload_systemd = True
+                    
+        if should_reload_systemd:
+            linux.system('systemctl daemon-reload', shell=True)
+
+
     # Reset private configuration
     priv_path = cnf.private_path()
     for file in os.listdir(priv_path):
@@ -453,8 +463,8 @@ def _cleanup_after_rebundle():
         try:
             os.remove(path) if (os.path.isfile(path) or os.path.islink(path)) else shutil.rmtree(path)
         except:
-            if linux.os.windows and sys.exc_info()[0] == WindowsError:         
-                # ScalrUpdClient locks db.sqlite 
+            if linux.os.windows and sys.exc_info()[0] == WindowsError:
+                # ScalrUpdClient locks db.sqlite
                 logger.debug(sys.exc_info()[1])
             else:
                 raise
@@ -467,7 +477,7 @@ def do_validate_cnf():
     def on_error(o, e, errors=errors):
         errors.append(e)
         print >> sys.stderr, 'error: [%s] %s' % (o.name, e)
-        
+
     cnf = bus.cnf
     cnf.bootstrap()
     cnf.validate(on_error)
@@ -477,14 +487,13 @@ def do_configure():
     optparser = bus.optparser
     cnf = bus.cnf
     cnf.reconfigure(
-        values=CmdLineIni.to_kvals(optparser.values.cnf), 
-        silent=optparser.values.import_server, 
+        values=CmdLineIni.to_kvals(optparser.values.cnf),
+        silent=optparser.values.import_server,
         yesall=optparser.values.yesall
     )
 
 def do_keygen():
-    from scalarizr.util import cryptotool
-    print cryptotool.keygen()    
+    print cryptotool.keygen()
 
 def _pre_main():
     optparser = bus.optparser = OptionParser()
@@ -494,14 +503,14 @@ def _pre_main():
             help='Configuration directory path')
     optparser.add_option('-l', dest='debug', action='store_true', default=False,
             help='Enable debug log')
-    optparser.add_option('-n', '--configure', dest='configure', action="store_true", default=False, 
-            help="Configure Scalarizr in the interactive mode by default. " 
+    optparser.add_option('-n', '--configure', dest='configure', action="store_true", default=False,
+            help="Configure Scalarizr in the interactive mode by default. "
             + "Use '-y -o' to configure Scalarizr non-interactively")
     optparser.add_option("-k", "--gen-key", dest="gen_key", action="store_true", default=False,
             help='Generate crypto key')
     optparser.add_option('-t', dest='validate_cnf', action='store_true', default=False,
             help='Validate configuration')
-    optparser.add_option('-m', '--import', dest="import_server", action="store_true", default=False, 
+    optparser.add_option('-m', '--import', dest="import_server", action="store_true", default=False,
             help='Import service into Scalr')
     optparser.add_option('-y', dest="yesall", action="store_true", default=False,
             help='Answer "yes" to all questions')
@@ -522,10 +531,10 @@ def _pre_main():
         try:
             sys.argv[sys.argv.index('region=')] += region
         except ValueError:
-            sys.argv += ['-o', 'region=' + region]        
-    
+            sys.argv += ['-o', 'region=' + region]
+
     optparser.parse_args()
-    
+
     # Daemonize process
     if linux.os['family'] != 'Windows' and optparser.values.daemonize:
         daemonize()
@@ -547,12 +556,12 @@ def main():
     except (BaseException, Exception), e:
         print >> sys.stderr, "error: Cannot initiate logging. %s" % (e)
         sys.exit(1)
-            
+
     try:
         _pre_main()
         svs = WindowsService() if linux.os.windows_family else Service()
         svs.start()
-            
+
     except (BaseException, Exception), e:
         if isinstance(e, SystemExit):
             raise
@@ -566,12 +575,58 @@ def main():
             sys.exit(1)
 
 
+def _bollard_pass_access_data(task, meta):
+    meta['ephemeral']['access_data'] = __node__['platform'].get_access_data()
+
+
+def _bollard_set_access_data(task, meta):
+    access_data = meta['ephemeral'].get('access_data', None)
+    if access_data:
+        __node__['platform'].set_access_data(access_data)
+
+
+def _bollard_clear_access_data(task, meta):
+    __node__['platform'].clear_access_data()
+
+
+def _bollard_send_operation_result(task, meta):
+    # TODO(marat) filter unrelevant tasks
+    result = task.scalr_serialize()
+    if result['name'].startswith('api.'):
+        # Drop `api.` prefix for asynchronously called Scalarizr API methods
+        result['name'] = result['name'][4:]
+    __node__['messaging'].send('OperationResult', body=result)
+
+
+def _bollard_fork():
+    if linux.os.windows:
+        return
+    for fd in os.listdir('/proc/self/fd'):
+        fd_abspath = os.path.join('/proc/self/fd', fd)
+        if not os.path.exists(fd_abspath):
+            continue
+        if re.match(r'pipe:\[\d+\]', os.path.basename(os.readlink(fd_abspath))):
+            try:
+                os.close(int(fd))
+            except OSError:
+                pass
+
+
 class Service(object):
+    __running = False
 
     def __init__(self):
         self._logger = logging.getLogger(__name__)
-        self._running  = False
         self._msg_thread = None
+
+    @property
+    def running(self):
+        return self.__running
+
+    @running.setter
+    def running(self, value):
+        self.__running = value
+        __node__['running'] = value
 
 
     def start(self):
@@ -609,25 +664,40 @@ class Service(object):
             do_configure()
             sys.exit()
 
-        elif optparser and optparser.values.import_server:
-            print "Starting import process..."
-            print "Don't terminate Scalarizr until Scalr will create the new role"
-            __node__['state'] = 'importing'
-            # Load Command-line configuration options and auto-configure Scalarizr
+        elif optparser:
+            if optparser.values.import_server:
+                print "Starting import process..."
+                print "Don't terminate Scalarizr until Scalr will create the new role"
+                __node__['state'] = 'importing'
+                # Load Command-line configuration options and auto-configure Scalarizr
 
-            values = CmdLineIni.to_kvals(optparser.values.cnf)
-            if not values.get('server_id'):
-                values['server_id'] = str(uuid.uuid4())
-            self._logger.info('Configuring Scalarizr. This can take a few minutes...')
-            cnf.reconfigure(values=values, silent=True, yesall=True)
+                values = CmdLineIni.to_kvals(optparser.values.cnf)
+                if not values.get('server_id'):
+                    values['server_id'] = str(uuid.uuid4())
+                self._logger.info('Configuring Scalarizr. This can take a few minutes...')
+                cnf.reconfigure(values=values, silent=True, yesall=True)
+            elif __node__['state'] == 'importing':
+                # Reset state
+                __node__['state'] = 'unknown'
 
+        if __node__['state'] != 'importing':
+            self._talk_to_updclient()
+            # UpdateClient should fetch meta-data for us.
+            metadata.wait(timeout=60)
+
+        if linux.os.windows:
+            try:
+                wintool.wait_boot()
+            except wintool.RebootExpected:
+                self._logger.info('Waiting for interruption...')
+                time.sleep(600)
 
         try:
             server_id = __node__['server_id']
         except KeyError:
             server_id = None
         if optparser and not optparser.values.import_server \
-                and server_id != _meta.user_data()['serverid']:
+                and server_id != metadata.user_data()['serverid']:
             # This role was bundled with Cloud API call (i.e. CreateImage)
             # Now we're starting with a new server and should reset it's state
             self._logger.info(('This image was bundled with cloud API call. '
@@ -637,6 +707,8 @@ class Service(object):
 
         if __node__['state'] == 'unknown':
             __node__['state'] = 'bootstrapping'
+        if __node__['state'] == 'rebundling':
+            __node__['state'] == 'running'
 
         if __node__['state'] == 'bootstrapping':
             _apply_user_data(from_scalr=False)
@@ -649,23 +721,17 @@ class Service(object):
         _init_platform()
         pl = bus.platform
 
-        if linux.os.windows:
-            self._wait_sysprep_oobe()
-
         # Initialize local database
         _init_db()
 
         STATE['global.start_after_update'] = int(bool(STATE['global.version'] and STATE['global.version'] != __version__))
         STATE['global.version'] = __version__
-            
-        if __node__['state'] != 'importing':
-            self._talk_to_updclient()
 
-        if __node__['state'] == 'importing':
+        if __node__['state'] == 'importing' and not linux.os.windows:
             try:
                 pkgmgr.updatedb()
             except:
-                self._logger.warn('Failed to update package manager database: %s', 
+                self._logger.warn('Failed to update package manager database: %s',
                     sys.exc_info()[1], exc_info=sys.exc_info())
 
         # Check Scalr version
@@ -691,7 +757,7 @@ class Service(object):
 
         # Initialize scalarizr services
         self._init_services()
-        
+
         if STATE['global.start_after_update'] and __node__['state'] == 'running':
             self._logger.info('Scalarizr was updated to %s', __version__)
             __node__['messaging'].send(
@@ -711,20 +777,20 @@ class Service(object):
         # Install signal handlers
         if not linux.os.windows:
             signal.signal(signal.SIGTERM, self.onSIGTERM)
-            signal.signal(signal.SIGHUP, self.onSIGHUP)
 
         self._start_services()
 
         # Fire start
-        self._running = True
+        self.running = True
         try:
             bus.fire("start")
-        except:
-            self._logger.warn('Caught exception in "start": %s', sys.exc_info()[1],
-                        exc_info=sys.exc_info())
+        except (BaseException, Exception) as e:
+            if isinstance(e, SystemExit):
+                raise
+            self._logger.warn('Caught exception in "start": %s', e, exc_info=sys.exc_info())
 
         try:
-            while self._running:
+            while self.running:
                 if linux.os.windows_family:
                     rc = win32event.WaitForSingleObject(self.hWaitStop, 30000)
                     if rc == win32event.WAIT_OBJECT_0:
@@ -743,35 +809,9 @@ class Service(object):
             self._logger.debug('Mainloop: KeyboardInterrupt')
         finally:
             self._logger.debug('Mainloop: finally')
-            if self._running and os.getpid() == _pid:
+            if self.running and os.getpid() == _pid:
                 self._shutdown()
         self._logger.debug('Mainloop: leave')
-
-
-    def _wait_sysprep_oobe(self):
-        try:
-            self._logger.debug('Checking sysprep completion')
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                 "SYSTEM\\Setup\\Status\\SysprepStatus", 0,
-                                 winreg.KEY_READ) as key:
-                gen_prev_state = gen_state = None
-                while True:
-                    gen_prev_state = gen_state
-                    gen_state = winreg.QueryValueEx(key, "GeneralizationState")[0]
-                    if gen_state == 7:
-                        if gen_prev_state:
-                            # Waiting for shutdown
-                            time.sleep(600)
-                        break
-                    time.sleep(1)
-                    self._logger.debug('Waiting for sysprep completion. '
-                              'GeneralizationState: %d' % gen_state)
-        except WindowsError, ex:
-            if ex.winerror == 2:
-                self._logger.debug('Sysprep data not found in the registry, '
-                          'skipping sysprep completion check.')
-            else:
-                raise ex
 
 
     def _port_busy(self, port):
@@ -785,78 +825,63 @@ class Service(object):
 
 
     def _select_control_ports(self):
-        defaults = __node__['defaults']['base']
-
         if __node__['state'] != 'importing':
-            try:
-                api_port = int(__node__['base']['api_port'])
-            except KeyError, ValueError:
-                api_port = defaults['api_port']
-            try:
-                messaging_port = int(__node__['base']['messaging_port'])
-            except KeyError, ValueError:
-                messaging_port = defaults['messaging_port']
-
-            if messaging_port == defaults['messaging_port'] and self._port_busy(messaging_port):
-                messaging_port = 8011
-            if api_port == defaults['api_port'] and self._port_busy(api_port):
-                api_port = 8009
-        else:
-            api_port = defaults['api_port']
-            messaging_port = defaults['messaging_port']
-
-        __node__['base'].update({
-            'api_port': api_port,
-            'messaging_port': messaging_port
-            })  
-
-        return api_port != defaults['api_port'] or messaging_port != defaults['messaging_port']    
+            updates = {}
+            for port_name, default_port, spare_port in (
+                ('api_port', 8010, 8009),
+                ('messaging_port', 8013, 8011)):
+                if __node__['base'][port_name] == default_port and self._port_busy(default_port):
+                    updates[port_name] = spare_port
+            if updates:
+                __node__['base'].update(updates)
+                return True
 
 
-    def _try_resolver(self, url):
+    def _ensure_resolver(self, url):
         try:
-            urllib2.urlopen(url).read()
-        except urllib2.URLError, e:
-            if isinstance(e.args[0], socket.gaierror):
-                eai = e.args[0]
-                if eai.errno == socket.EAI_NONAME:
+            requests.get(url, verify=False, timeout=(1, 0.01))
+        except requests.ConnectionError as e:
+            is_gaie = isinstance(e.args[0], requests.packages.urllib3.exceptions.ProtocolError) \
+                and len(e.args[0].args) > 1 \
+                and isinstance(e.args[0].args[1], socket.gaierror)
+            if is_gaie:
+                gaie = e.args[0].args[1]  # getaddrinfo() error
+                if gaie.errno == socket.EAI_NONAME:
                     with open('/etc/resolv.conf', 'w+') as fp:
                         fp.write('nameserver 8.8.8.8\n')
-                elif eai.errno == socket.EAI_AGAIN:
+                elif gaie.errno == socket.EAI_AGAIN:
                     os.chmod('/etc/resolv.conf', 0755)
                 else:
                     raise
-
-                # reload resolver 
-                res_init()
+                # reload resolver
+                libc_res_init()
             else:
-                raise 
+                raise
+        except requests.Timeout:
+            # connection and read timeouts come after DNS probe
+            pass
 
 
     def _init_services(self):
         logger = logging.getLogger(__name__)
         cnf = bus.cnf; ini = cnf.rawini
-        server_id = ini.get('general', 'server_id')
-        queryenv_url = ini.get('general', 'queryenv_url')
         messaging_adp = ini.get('messaging', 'adapter')
 
         # Set base URL
-        pr = urlparse(queryenv_url)
+        pr = urlparse(__node__['queryenv_url'])
         bus.scalr_url = urlunparse((pr.scheme, pr.netloc, '', '', '', ''))
         logger.debug("Got scalr url: '%s'" % bus.scalr_url)
 
         if not linux.os.windows and __node__['platform'].name == 'openstack':
-            self._try_resolver(bus.scalr_url)
+            self._ensure_resolver(bus.scalr_url)
 
         # Create periodical executor for background tasks (cleanup, rotate, gc, etc...)
         bus.periodical_executor = PeriodicalExecutor()
 
         logger.debug("Initialize QueryEnv client")
-        queryenv = QueryEnvService(queryenv_url, server_id, cnf.key_path(cnf.DEFAULT_KEY), '2008-12-16')
-        queryenv_latest = queryenv.get_latest_version()
-        queryenv = QueryEnvService(queryenv_url, server_id, cnf.key_path(cnf.DEFAULT_KEY), queryenv_latest)
+        queryenv = new_queryenv()
 
-        if tuple(map(int, queryenv_latest.split('-'))) >= (2012, 7, 1):
+        if tuple(map(int, STATE['queryenv.api_version']['version'].split('-'))) >= (2012, 7, 1):
             scalr_version = queryenv.get_global_config()['params'].get('scalr.version')
             if scalr_version:
                 bus.scalr_version = tuple(map(int, scalr_version.split('.')))
@@ -867,9 +892,17 @@ class Service(object):
         bus.queryenv_service = queryenv
         bus.queryenv_version = tuple(map(int, queryenv.api_version.split('-')))
 
+        self._init_bollard()
+
         if __node__['state'] != 'importing':
             lfrp = bus.queryenv_service.list_farm_role_params(__node__['farm_role_id'])['params']
-            __node__['base'].update(lfrp.get('base', {}))
+            __node__['base'].update(lfrp.get('base'))
+            if __node__['base']['union_script_executor'] and not linux.os.windows:
+                # Replace script execution with a new system
+                bus.cnf.rawini.remove_option('handlers', 'script_executor')
+                bus.cnf.rawini.remove_option('handlers', 'chef')
+                bus.cnf.rawini.set('handlers', 'union_base', 'scalarizr.handlers.union.base')
+
         ports_non_default = self._select_control_ports()
 
         logger.debug("Initialize messaging")
@@ -877,12 +910,12 @@ class Service(object):
         try:
             params = dict(ini.items("messaging_" + messaging_adp))
             if ports_non_default:
-                consumer_url = list(urlparse(params[P2pConfigOptions.CONSUMER_URL]))
+                consumer_url = list(urlparse(params['consumer_url']))
                 consumer_url[1] = ':'.join((consumer_url[1].split(':')[0], str(__node__['base']['messaging_port'])))
-                params[P2pConfigOptions.CONSUMER_URL] = urlunparse(consumer_url)
+                params['consumer_url'] = urlunparse(consumer_url)
 
-            params[P2pConfigOptions.SERVER_ID] = server_id
-            params[P2pConfigOptions.CRYPTO_KEY_PATH] = cnf.key_path(cnf.DEFAULT_KEY)
+            params['server_id'] = __node__['server_id']
+            params['crypto_key_path'] = cnf.key_path(cnf.DEFAULT_KEY)
 
             msg_service = factory.new_service(messaging_adp, **params)
             bus.messaging_service = msg_service
@@ -890,28 +923,6 @@ class Service(object):
             raise ScalarizrError("Cannot create messaging service adapter '%s'" % (messaging_adp))
 
         optparser = bus.optparser
-        if optparser and not optparser.values.import_server and linux.os['family'] != 'Windows':
-            system_packages = pkgmgr.package_mgr().list()
-            for behavior in __node__['behavior']:
-                if behavior in ['base', 'mongodb'] or behavior not in api.api_routes.keys():
-                    continue
-                try:
-                    api_cls = util.import_class(api.api_routes[behavior])
-                    api_cls.check_software(system_packages)
-                except exceptions.NotFound as e:
-                    logger.error(e)
-                except exceptions.UnsupportedBehavior as e:
-                    if e.args[0] == 'chef':
-                        # We pass it, cause a lot of roles has chef behavior without chef installed on them
-                        continue
-                    __node__['messaging'].send(
-                        'RuntimeError',
-                        body={
-                            'code': 'UnsupportedBehavior',
-                            'message': str(e)
-                        }
-                    )
-                    raise sys.exc_info()[0], sys.exc_info()[1], sys.exc_info()[2]
 
         logger.debug('Initialize message handlers')
         consumer = msg_service.get_consumer()
@@ -945,8 +956,8 @@ class Service(object):
             class ThreadingWSGIServer(SocketServer.ThreadingMixIn, wsgiref.simple_server.WSGIServer):
                 pass
             bus.api_server = wsgiref.simple_server.make_server('0.0.0.0',
-                                __node__['base']['api_port'], 
-                                api_app, 
+                                __node__['base']['api_port'],
+                                api_app,
                                 server_class=ThreadingWSGIServer)
 
         if ports_non_default:
@@ -960,6 +971,8 @@ class Service(object):
 
 
     def _start_services(self):
+        self._start_bollard()
+
         # Create message server thread
         msg_service = bus.messaging_service
         consumer = msg_service.get_consumer()
@@ -980,49 +993,56 @@ class Service(object):
         ex.start()
 
     def _talk_to_updclient(self):
+        def get_update_status():
+            status_file = os.path.join(__node__['etc_dir'], 'private.d', 'update.status')
+            if os.path.exists(status_file):
+                with open(status_file) as fp:
+                    return json.load(fp)
+            return None
+
+        def wait_updclient_actionable_state():
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(.2)
+                s.connect(('127.0.0.1', 8008))
+                s.close()
+            except socket.error:
+                self._logger.debug('UpdateClient API (port: 8008) connection timeouted')
+                return
+
+            s = get_update_status()
+            if s:
+                return s['state'] != 'noop'
+
+        def wait_updclient_transition_to_finish():
+            s = get_update_status()
+            return not s['state'].startswith('in-progress')
+
         try:
-            upd = jsonrpc_http.HttpServiceProxy('http://127.0.0.1:8008', bus.cnf.key_path(bus.cnf.DEFAULT_KEY))
-            upd_svs = ScalrUpdClientScript()
-            if not upd_svs.running:
-                upd_svs.start()
+            svs = ScalrUpdClientScript()
+            if not svs.running:
+                svs.start()
 
-            upd_status = {}
-            def upd_ready():
-                try:
-                    self._logger.debug('Fetching UpdateClient status...')
-                    upd_status.update(upd.status(cached=True))
-                    self._logger.debug('UpdateClient status: %s', upd_status)
-                    return upd_status['state'] != 'noop'
-                except (IOError, socket.error), exc:
-                    self._logger.debug('Failed to get UpdateClient status: %s', exc)
-                except:
-                    exc = sys.exc_info()[1]
-                    if 'Server-ID header not presented' in str(exc):
-                        self._logger.info(('UpdateClient serves previous API version. '
-                            'Looks like we are in a process of migration to new update sytem. '
-                            'UpdateClient restart will handle this situation. Restarting'))
-                        upd_svs.restart()
-                    elif 'No module named' in str(exc):
-                        self._logger.info(('Scalarizr was downgraded to previous installer version. '
-                            'UpdateClient restart required. Restarting'))
-                        upd_svs.restart()
-                    else:
-                        raise
-
-
-            wait_until(upd_ready, timeout=60, sleep=1)
-            upd_state = upd_status['state']
-            self._logger.info('UpdateClient state: %s', upd_state)
-            if upd_state == 'in-progress/restart':
-                self._logger.info('Scalarizr was restarted by update process')
-            elif upd_state.startswith('in-progress'):
-                version = (upd_status['candidate'] or upd_status['installed']).split('-')[0]
+            self._logger.info('Polling UpdateClient state...')
+            wait_until(wait_updclient_actionable_state,
+                timeout=60,
+                sleep=1,
+                error_text='Failed to get UpdateClient status')
+            update_status = get_update_status()
+            self._logger.info('UpdateClient state: %s', update_status['state'])
+            if update_status['state'].startswith('in-progress'):
+                version = (update_status['candidate'] or update_status['installed']).split('-')[0]
                 if version != __version__:
                     self._logger.info('Update is in-progress, exiting')
                     sys.exit()
-            elif upd_state == 'completed/wait-ack':
+                wait_until(wait_updclient_transition_to_finish,
+                    timeout=60,
+                    sleep=1,
+                    error_text='UpdateClient hangs in-progress')
+                update_status = get_update_status()
+            if update_status['state'] == 'completed/wait-ack':
                 self._logger.info('UpdateClient completed update and should be restarted, restarting')
-                upd_svs.restart()
+                svs.restart()
         except:
             if sys.exc_info()[0] == SystemExit:
                 raise
@@ -1030,7 +1050,7 @@ class Service(object):
 
 
     def _shutdown(self):
-        self._running = False
+        self.running = False
         try:
             bus.fire("shutdown")
         except:
@@ -1039,6 +1059,8 @@ class Service(object):
         try:
             self._logger.info("[pid: %d] Stopping scalarizr %s", os.getpid(), __version__)
             self._shutdown_services()
+        except KeyboardInterrupt:
+            raise
         except:
             self._logger.debug('Shutdown services exception', exc_info=sys.exc_info())
         finally:
@@ -1047,28 +1069,84 @@ class Service(object):
 
         self._logger.info('[pid: %d] Scalarizr terminated', os.getpid())
 
+    def _init_bollard(self):
+        if linux.os.windows:
+            return
+        # FatMouse integration
+        import agent.celeryfile
+        import agent.config
+        agent.config.TASK_ENGINE = 'bollard'
+        agent.config.HOME_DIR = \
+            os.path.expandvars('$ProgramData\\scalarizr') \
+            if linux.os.windows else \
+            '/var/lib/scalarizr'
+        agent.config.CACHE_DIR = os.path.join(agent.config.HOME_DIR, 'cache')
+        task_modules = [
+            'scalarizr.api.mariadb',
+            'scalarizr.api.mysql',
+            'scalarizr.api.operation',
+            'scalarizr.api.postgresql',
+            'scalarizr.api.redis',
+            'scalarizr.api.storage',
+            'scalarizr.api.system'] + \
+            list(agent.celeryfile.CELERY_INCLUDE)
+        callbacks = {
+            'global.push': _bollard_pass_access_data,
+            'global.before': _bollard_set_access_data,
+            'global.after': _bollard_clear_access_data,
+            'global.pull': _bollard_send_operation_result,
+            'global.fork': _bollard_fork}
+
+        if not os.path.exists(bus.cnf.key_path('bollard')):
+            bollard_key = cryptotool.keygen(length=40)
+            bus.cnf.write_key('bollard', bollard_key, 'Bollard crypto key')
+
+        bollard.CRYPTO_KEY = bus.cnf.read_key('bollard')
+        bollard.AUTH_KEY = bollard.CRYPTO_KEY[0:16]
+
+        __node__['bollard'] = bollard.Executor(
+            task_modules=task_modules, 
+            callbacks=callbacks,
+            push_server_address='/var/run/scalarizr.push.sock', 
+            pull_server_address='/var/run/scalarizr.pull.sock')
+
+
+    def _start_bollard(self): 
+        if linux.os.windows:
+            return
+        __node__['bollard'].start()
+
+
+    def _shutdown_bollard(self):
+        if __node__.get('bollard'):
+           __node__['bollard'].stop(workers=False)
+
 
     def _shutdown_services(self, force=False):
+        self._shutdown_bollard()
 
         # Shutdown messaging
-        self._logger.debug('Shutdowning external messaging')
-        msg_service = bus.messaging_service
-        msg_service.get_consumer().shutdown(force=True)
-        msg_service.get_producer().shutdown()
-        bus.messaging_service = None
+        if bus.messaging_service:
+            self._logger.debug('Shutdowning external messaging')
+            msg_service = bus.messaging_service
+            msg_service.get_consumer().shutdown(force=True)
+            msg_service.get_producer().shutdown()
+            bus.messaging_service = None
 
         # Shutdown API server
-        self._logger.debug('Shutdowning API server')
-        api_server = bus.api_server
-        api_server.shutdown()
-        bus.api_server = None
+        if bus.api_server:
+            self._logger.debug('Shutdowning API server')
+            api_server = bus.api_server
+            api_server.shutdown()
+            bus.api_server = None
 
 
         # Shutdown periodical executor
-        self._logger.debug('Shutdowning periodical executor')
-        ex = bus.periodical_executor
-        ex.shutdown()
-        bus.periodical_executor = None
+        if bus.periodical_executor:
+            self._logger.debug('Shutdowning periodical executor')
+            ex = bus.periodical_executor
+            ex.shutdown()
+            bus.periodical_executor = None
 
 
     def onSIGTERM(self, *args):
@@ -1079,25 +1157,6 @@ class Service(object):
             # Main process
             self._logger.debug('Shutdown main process (pid: %d)', pid)
             self._shutdown()
-
-
-    def onSIGHUP(self, *args):
-        pid = os.getpid()
-        self._logger.debug('Received SIGHUP (pid: %d)', pid)
-        if pid != _pid:
-            return
-
-        self._logger.info('Reloading scalarizr')
-        self._running = False
-        bus.fire('shutdown')
-        self._shutdown_services()
-
-        self._running = True
-        cnf = bus.cnf
-        cnf.bootstrap(force_reload=True)
-        self._init_services()
-        self._start_services()
-        bus.fire('reload')
 
 
 if 'Windows' == linux.os['family']:
@@ -1157,7 +1216,9 @@ if 'Windows' == linux.os['family']:
                     win32service.CloseServiceHandle(hscm)
                 """
                 #win32serviceutil.StartService(WindowsService._svc_name_)
-                sys.exit()
+                # [ SCALARIZR-2054 ]
+                time.sleep(1)
+                os._exit(0)
 
             elif optparser and optparser.values.uninstall_win_services:
                 # Uninstall win services
@@ -1181,21 +1242,24 @@ if 'Windows' == linux.os['family']:
         def SvcStop(self):
             self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
             win32event.SetEvent(self.hWaitStop)
-            '''
-            if self._running:
-                self._running = False
-            else:
-                try:
-                    self._shutdown()
-                finally:
-                    self._stopping = True
-            '''
 
 
         def SvcShutdown(self):
+            self.shutdown()
+
+
+        @classmethod
+        def shutdown(cls):
+            logger = logging.getLogger(__name__)
             if __node__['state'] != 'running':
-                return          
+                logger.debug('Skipping Win_HostDown firing, server state is: {}'.format(
+                    __node__['state']))
+                return  
+            if Flag.exists(Flag.REBOOT):
+                logger.debug('Skipping shutdown routines, cause reboot flag already set')
+                return
             Flag.set(Flag.REBOOT)
             srv = bus.messaging_service
             message = srv.new_message(Messages.WIN_HOST_DOWN)
             srv.get_producer().send(Queues.CONTROL, message)
+

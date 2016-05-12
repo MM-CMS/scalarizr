@@ -45,9 +45,8 @@ if linux.os.debian_family:
         'redis.conf': '/etc/redis/redis.conf',
     })
 else:
-    redis_bin_path = '/usr/sbin/redis-server'
-    if "centos" in linux.os['name'].lower() and linux.os["release"].version[0] == 7:
-        redis_bin_path = '/usr/bin/redis-server'  # [SCALARIZR-1624]
+    # [SCALARIZR-1776]
+    redis_bin_path = firstmatched(os.path.exists, ('/usr/sbin/redis-server', '/usr/bin/redis-server'))
 
     __redis__.update({
         'redis-server': redis_bin_path,
@@ -78,7 +77,6 @@ class RedisInitScript(initdv2.ParametrizedInitScript):
         return obj
 
     def __init__(self):
-        initd_script = None
         if linux.os.ubuntu and linux.os['version'] >= (10, 4):
             initd_script = ('/usr/sbin/service', 'redis-server')
         else:
@@ -126,9 +124,15 @@ class Redisd(object):
 
     def __init__(self, config_path=None, port=None):
         self.config_path = config_path
-        self.redis_conf = RedisConf(config_path)
         self.port = port or self.redis_conf.port
-        self.cli = RedisCLI(self.redis_conf.requirepass, self.port)
+
+    @property
+    def redis_conf(self):
+        return RedisConf(self.config_path)
+
+    @property
+    def cli(self):
+        return RedisCLI(self.redis_conf.requirepass, self.port)
 
     @classmethod
     def find(cls, config_obj=None, port=None):
@@ -172,9 +176,13 @@ class Redisd(object):
     def stop(self, reason=None):
         if self.running:
             if self.pid:
+                LOG.debug("Waiting until redis service is ready to shut down")
+                wait_until(lambda: not self._is_aof_rewrite_running)  # http://redis.io/commands/shutdown
                 LOG.info('Stopping redis server on port %s (pid %s). Reason: %s' % (self.port, self.pid, reason))
                 os.kill(int(self.pid), signal.SIGTERM)
+                #self.cli.execute("SHUTDOWN SAVE")
                 wait_until(lambda: not self.running)
+                LOG.debug("Redis process terminated.")
             else:
                 #XXX: rare case when process is alive but scalarizr is unable to get PID
                 raise ServiceError("Cannot stop redis process: PID file not found.")
@@ -194,8 +202,23 @@ class Redisd(object):
         for config_path in get_redis_processes():
             is_default_conf = config_path == __redis__['defaults']['redis.conf']
             is_default_port = int(self.port) == __redis__['defaults']['port']
-            if config_path == self.config_path or (is_default_conf and is_default_port):
+            if (config_path == self.config_path) or (is_default_conf and is_default_port):
                 return True
+        return False
+
+    @property
+    def _is_aof_rewrite_running(self):
+        """
+        Redis 2.8 seems to be unable to shutdown when it has child processes running
+        """
+        try:
+            out = system2(('ps', '-G', 'redis', '-o', 'command', '--no-headers'))[0]
+        except:
+            out = ''
+        if out:
+            for line in out.split('\n'):
+                if "redis-aof-rewrite" in line and str(self.port) in line:
+                    return True
         return False
 
     @property
@@ -953,12 +976,9 @@ def get_log_path(port=__redis__['defaults']['port']):
 def get_pidfile(port=__redis__['defaults']['port']):
 
     pid_file = os.path.join(__redis__['pid_dir'], 'redis-server.%s.pid' % port)
-    '''
-    fix for ubuntu1004
-    '''
-    if not os.path.exists(pid_file):
+    if not os.path.exists(pid_file):  # fix for ubuntu1004
         open(pid_file, 'w').close()
-    chown_r(pid_file, 'redis')
+        chown_r(pid_file, 'redis')
     return pid_file
 
 

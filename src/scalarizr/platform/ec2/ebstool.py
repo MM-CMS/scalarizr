@@ -1,4 +1,3 @@
-from __future__ import with_statement
 '''
 Created on Aug 25, 2010
 
@@ -22,7 +21,14 @@ from scalarizr import storage
 DEFAULT_TIMEOUT = 2400          # 40 min
 SNAPSHOT_TIMEOUT = 3600         # 1 h
 
-def create_snapshot(ec2_conn, volume_id, description=None, logger=None, timeout=SNAPSHOT_TIMEOUT, wait_completion=False, tags=None):
+def create_snapshot(ec2_conn,
+    volume_id,
+    description=None,
+    logger=None,
+    timeout=SNAPSHOT_TIMEOUT,
+    wait_completion=False,
+    tags=None):
+
     if isinstance(volume_id, Volume):
         volume_id = volume_id.id
     logger = logger or logging.getLogger(__name__)
@@ -86,7 +92,11 @@ def create_volume(ec2_conn, size, avail_zone, snap_id=None, volume_type=None, io
     if snap_id:
         wait_snapshot(ec2_conn, snap_id, logger)
 
-    vol = ec2_conn.create_volume(size, avail_zone, snapshot=snap_id, volume_type=volume_type, iops=iops)
+    vol = ec2_conn.create_volume(size,
+        avail_zone,
+        snapshot=snap_id,
+        volume_type=volume_type,
+        iops=iops)
     logger.debug('EBS volume %s created%s', vol.id, snap_id and ' from snapshot %s' % snap_id or '')
 
     logger.debug('Checking that EBS volume %s is available', vol.id)
@@ -108,7 +118,13 @@ def create_volume(ec2_conn, size, avail_zone, snap_id=None, volume_type=None, io
 
     return vol
 
-def attach_volume(ec2_conn, volume_id, instance_id, devname, to_me=False, logger=None, timeout=DEFAULT_TIMEOUT):
+def attach_volume(ec2_conn,
+    volume_id,
+    instance_id,
+    devname,
+    to_me=False,
+    logger=None,
+    timeout=DEFAULT_TIMEOUT):
     logger = logger or logging.getLogger(__name__)
     if isinstance(volume_id, basestring):
         vol = Volume(ec2_conn)
@@ -126,19 +142,24 @@ def attach_volume(ec2_conn, volume_id, instance_id, devname, to_me=False, logger
             else:
                 raise
         return 1
-    wait_until(attach, logger=logger, timeout=30,
-                    start_text='Attaching volume %s as device %s%s' % (vol.id, devname, not to_me and ' instance %s' % instance_id or ''),
-                    error_text="Failed to attach EBS volume %s. AttachVolume operation respond with 400 code without any details" % vol.id)
+
+    start_text = 'Attaching volume %s as device %s%s' % \
+        (vol.id, devname, ' instance %s' % instance_id if not to_me else '')
+    wait_until(attach,
+        logger=logger,
+        timeout=30,
+        start_text=start_text,
+        error_text="Failed to attach EBS volume %s. AttachVolume operation respond"
+            " with 400 code without any details" % vol.id)
 
     logger.debug('Checking that volume %s is attached', vol.id)
     wait_until(
             lambda: vol.update() and vol.attachment_state() == 'attached',
-            logger=logger, timeout=timeout,
+            logger=logger,
+            timeout=timeout,
             error_text="EBS volume %s wasn't attached in a reasonable time"
-                            " (status=%s attachment_state=%s)." % (
-                            vol.id, vol.status, vol.attachment_state())
-    )
-    logger.debug('Volume %s attached',  vol.id)
+                " (status=%s attachment_state=%s)." % (vol.id, vol.status, vol.attachment_state()))
+    logger.debug('Volume %s attached', vol.id)
 
     devname = real_devname(devname)
     if to_me:
@@ -153,7 +174,7 @@ def attach_volume(ec2_conn, volume_id, instance_id, devname, to_me=False, logger
     return vol, devname
 
 
-get_system_devname = real_devname= storage.get_system_devname
+get_system_devname = real_devname = storage.get_system_devname
 
 get_ebs_devname = storage.get_cloud_devname
 
@@ -195,7 +216,9 @@ def apply_tags(ec2_conn, resources, tags=None, logger=None):
         logger.debug('Applying tags to resource(s) %s', resources_str)
         ec2_conn.create_tags(resources.keys(), tags)
     except:
-        logger.warn('Cannot apply tags to resource(s) %s. %s: %s', resources_str, *sys.exc_info()[0:2])
+        logger.warn('Cannot apply tags to resource(s) %s. %s: %s',
+            resources_str,
+            *sys.exc_info()[0:2])
 
 
 def _std_tags():

@@ -1,8 +1,0 @@
-#!/bin/bash
-
-set -x
-
-
-if [ "$1" == "configure" ]; then
-    sed -i 's/platform = ec2/platform = cloudstack/i' /etc/scalr/public.d/config.ini
-fi

@@ -1,0 +1,281 @@
+Package: scalr-upd-client
+Priority: extra
+Section: net
+Installed-Size: 188
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Version: 0.3.b15.cc44a12
+Depends: python (>= 2.5), python-support (>= 0.90.0), python-m2crypto, python-pkg-resources
+Filename: master/scalr-upd-client_0.3.b15.cc44a12_all.deb
+Size: 19410
+MD5sum: 279bb3b8f9f1620a21396d4c53b205ee
+SHA1: a81072e202428c84e1af0cb11e455033a49f0d08
+SHA256: a9d29e7a355692293b2cefd5761306d45922976d04d4054369d1bb8efe355a80
+SHA512: bd21702d350db67a05ec5c117d36c78194123bd8102501dac83d22c493a197f56412d6ded1b898849eec37ef2dfe480149ea17ccd580eb1516d52b12a689c5ae
+Description: Client for Scalr update server
+ Client for Scalr update server
+Homepage: http://scalr.net
+
+Package: scalarizr-eucalyptus
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Depends: scalarizr-ec2 (= 0.13.b640.14eddc8)
+Filename: master/scalarizr-eucalyptus_0.13.b640.14eddc8_all.deb
+Size: 3506
+MD5sum: f34d807cb14889efbf053649d15825ec
+SHA1: 18adaa569495e6cad19b577bcb6845b4581b426a
+SHA256: 73fd1b9d32d4813d1ecb287e8db131ed2bae447e802190b5535ee38791d165de
+SHA512: 87762aaadb6f8dca6894b822cd00feb50d045802d7b207783d974ba8de83d22b463b2689ecc3abbd246c73672495b128353a9efd5e5d97c73d3d28bff277f4a2
+Description: Scalarizr agent for Eucalyptus
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr-ec2
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8), python-boto (>= 2.6.0)
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-ec2_0.13.b640.14eddc8_all.deb
+Size: 1760
+MD5sum: 4bbcade104bc63adc347ac2b63299191
+SHA1: 3d6052c061c8887f45731e38b5b3acc6b6ef38fb
+SHA256: 1aea24a1d25d2120b2e8803be1e1f817140d07b38132e824d938424dba26ed3a
+SHA512: d53f672e0e5f328b665a87763eed4dca24beb9a6ec21c78b75727d56d3ec0bc650951e8b48f31dee65e73ab264c7dc5ae1fa8e10b55eb4ec11c5b939a5aa42dd
+Description: Scalarizr agent for Amazon EC2
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr-gce
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8), python-google-api-client, python-openssl
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-gce_0.13.b640.14eddc8_all.deb
+Size: 1772
+MD5sum: c3ed38c77f08ed4a5cd64cc1d7e36cae
+SHA1: b12b6792665f461d8fde94c473dbc9db9c249f7d
+SHA256: c805f74aae299b7c6d461748298e0ee21bc3afabd0dc8b570d1b798f16802561
+SHA512: a3e20e61cf9662ee2908d518821fd9cff4ac75cd409604e9286948c1bc3c8ed23a2e93162e3305c1b6b17a3e0c073b98fcb195fb6a3454681cd6c18dfc952f41
+Description: Scalarizr agent for Google Cloud Engine
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr-ucloud
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8), python-cloudstack
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-ucloud_0.13.b640.14eddc8_all.deb
+Size: 1768
+MD5sum: 6cdd9922784b9301e9cc28608171d6e1
+SHA1: 46969b74d60d6cb72621b9f148aa9c7ae5423587
+SHA256: 90c0471bf3069857bc5c87f53e1be00b274469d78bed322705a0b7abf62e9996
+SHA512: f6ab7de7b83ee0170ad7707c599602253032e1a27bb5b44aece7dd755eddd580183da413859cc63c8ff50d8b3838a40bcee20408c7fe8bd55a9755a63c72b5bc
+Description: Scalarizr agent for uCloud (Korea Telecom) cloud
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: python-cloudstack
+Priority: optional
+Section: python
+Installed-Size: 172
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: cloudstack
+Version: 0.2.b8.138ab69
+Depends: python (>= 2.6), python-support (>= 0.90.0)
+Filename: master/python-cloudstack_0.2.b8.138ab69_all.deb
+Size: 16440
+MD5sum: 3dcd1b9e5e1f11eb7f5aa748dfd051ce
+SHA1: fd72464966150205aac649e9c894175b19874206
+SHA256: a60e2412dd535cb6f03dae60cd31d9435de7ab40115493b529f2a964aa1c8fac
+SHA512: 704e93746c546fafcc8c011b6e69103f2f0661436495abad0bb4b2a895dd685be5bc01dce01c4d47811e35856212dcdc29ef1482d3195d24f12963dbca181e82
+Description: Cloud.com Cloudstack Client
+ Provides a simple python client to cloud.com's api.
+Python-Version: 2.6
+
+Package: scalarizr-rackspace
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8), python-rackspace-cloudfiles (>= 1.5.1), python-rackspace-cloudservers (>= 1.0~a5), python-swiftclient (>= 1.2.0)
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-rackspace_0.13.b640.14eddc8_all.deb
+Size: 1800
+MD5sum: 56cc5b9a2a6caf258ab2f05341012483
+SHA1: 2363492a07a346e33b8a436d580775b0c5bdc9bf
+SHA256: a0e9f0d72305de9cc727524fb4abd2d04d4da50874d8bdbfdeb4012a0c36beca
+SHA512: 1aa12749dec0f58e91fea6e7417da0e8ca2b10e4a0dd7e2ae8a08b2151b0c08f2536c8baf1b34cba4f7306a17cc4fdc23b5c262909981a70c46830086ba8b479
+Description: Scalarizr agent for Rackspace cloud
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr-idcf
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8), python-cloudstack
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-idcf_0.13.b640.14eddc8_all.deb
+Size: 1756
+MD5sum: b664b76e820563df507eafbf53915a13
+SHA1: e651452a8ca2fc1aa54354b0415c441b632eadf0
+SHA256: 63b24bb5656bc0e87e25536d83ec2c0d8e9a02ada62aad2298ab9316fb3d6642
+SHA512: f90280bb5d34e43b724482998ed259bcfe987711a508afb73401756748de3f0c08f8268d6150cafd6f0efb993c693a19f4e2b5c10ab95047a2ddfb06d5c00ead
+Description: Scalarizr agent for IDCF cloud
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr
+Priority: extra
+Section: net
+Installed-Size: 40
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Version: 0.13.b640.14eddc8
+Depends: scalarizr-ec2 (= 0.13.b640.14eddc8) | scalarizr-rackspace (= 0.13.b640.14eddc8) | scalarizr-nimbula (= 0.13.b640.14eddc8) | scalarizr-openstack (= 0.13.b640.14eddc8) | scalarizr-cloudstack (= 0.13.b640.14eddc8) | scalarizr-gce (= 0.13.b640.14eddc8) | scalarizr-ucloud (= 0.13.b640.14eddc8) | scalarizr-idcf (= 0.13.b640.14eddc8)
+Filename: master/scalarizr_0.13.b640.14eddc8_all.deb
+Size: 3922
+MD5sum: d241db2faf5b538cbfebbe3cbeca8a6b
+SHA1: 1dc314ec340e7f3982cd66fc43916d8d386249ce
+SHA256: 28530b3a07c4e7c9f8a1d185f685f8ba4b013066068616c8c8fe9e5d3fb5727b
+SHA512: abddd780f6d1ff2b38ab6030b537428a059e0a4f44d8b8523d2405cdf9b2b552544b80cf87ee4963cd40898110a8fc7cbc7d3eb53d64b142abccbdc76f4e9102
+Description: Scalarizr converts any server to Scalr-manageable node
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr-devtools
+Priority: extra
+Section: net
+Installed-Size: 136
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Version: 0.1.b15.83cdd79
+Depends: python (>= 2.5), python-support (>= 0.90.0), python-pkg-resources
+Filename: master/scalarizr-devtools_0.1.b15.83cdd79_all.deb
+Size: 8242
+MD5sum: 145ea77d93947304307d90deb1cbd962
+SHA1: 1b3e1afc489d4dd00bbab005e37b9c0f58d8b00a
+SHA256: bb2781f8a6c583497e70c688b9010c2d2b1db87d481af6dce3ae6bc71a91fbd3
+SHA512: 3ca4098f77edd1c87626e667fdcaa558aaa2e6ffabccc4623a3891457f68b6bc586a41c62a90e64cbf1ccb6b364d87188f2b5c3311d3fb4f2d2a7ab2ad787f26
+Description: Scalarizr deploy tools for devel roles
+ Scalarizr deploy tools for devel roles
+Homepage: http://scalr.net
+
+Package: scalarizr-base
+Priority: extra
+Section: net
+Installed-Size: 2636
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Replaces: scalarizr (<< 0.7)
+Depends: python (>= 2.5), python-support (>= 0.90.0), scalr-upd-client, python-m2crypto (= 0.20.1-1ubuntu5) | python-m2crypto (>= 0.20), python-pysnmp4 (>= 4.1.12a), python-pysnmp4-mibs (>= 0.0.5a), python-pexpect (>= 2.1), python-prettytable, python-yaml, python (>= 2.6) | python-simplejson, python (<< 2.6) | python-pychef, python (<< 2.6) | python-pymysql, rsync (>= 2.6.8)
+Breaks: scalarizr (<< 0.7)
+Filename: master/scalarizr-base_0.13.b640.14eddc8_all.deb
+Size: 485362
+MD5sum: 52a3351ade1a310f9df671ca2ed8afe6
+SHA1: 0ebf70ca979de5141788c5c75f5d741e1354f089
+SHA256: 8a3cc619c074973bf3192747b966b18d6f2216ba92e3ee9325dc714419aaaabb
+SHA512: 75c217e2916a56ba2079b30d46454bf5662a96eeb4b513a8357b11d094d5aa4bb79c9420d418a9d746623b1373d85443ae872e9649ed8f72b9315bac1e273bcd
+Description: Scalarizr agent common files
+ Scalarizr base components common for all cloud platforms.
+Homepage: http://scalr.net
+
+Package: scalarizr-openstack
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8), python-novaclient (>= 2.6.1), python-rackspace-novaclient (>= 1.0), python-cinderclient (>= 1.0.1), python-swiftclient (>= 1.2.0), python-keystoneclient (>= 0.2.2)
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-openstack_0.13.b640.14eddc8_all.deb
+Size: 1816
+MD5sum: f58e836388a520dfa755fc19c14a811c
+SHA1: ffdb3bd09c142db83e366327eb8ef2169e643bfb
+SHA256: 2255749eda6e5ec88874aa3713e421e946a9b8be49568e0c598a725a5650d9c3
+SHA512: 57334ee59beaf0ac44050e4693459139b28a337403c53aaed0e29fef14884e70c44d87d4aa2e790d54f3dd6bfc74fd4babc91fbd7604eb9fb9e6c2487ee01686
+Description: Scalarizr agent for Openstack cloud
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr-cloudstack
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8), python-cloudstack (>= 0.1.r16)
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-cloudstack_0.13.b640.14eddc8_all.deb
+Size: 1776
+MD5sum: 16b9d357588526af5a425279f939cdc5
+SHA1: bedf72291965b26fc6383d93b95fdbf84c0555c4
+SHA256: 6027e3224e4970d3c13e52dc12e14b43fefcd3084f0656425fadd173f6206d85
+SHA512: c4d221330f2943c9358a3eaba31ce4f5c9164d6656af8afcf25786607a15a9eae5bcadc724f56500ccf08527b2e909eb23637c84403ab531557a1f576fc7944f
+Description: Scalarizr agent for CloudStack (cloud.com) cloud
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+
+Package: scalarizr-nimbula
+Priority: extra
+Section: net
+Installed-Size: 32
+Maintainer: Scalr Inc. <packages@scalr.net>
+Architecture: all
+Source: scalarizr
+Version: 0.13.b640.14eddc8
+Provides: scalarizr, scalarizr-agent
+Depends: scalarizr-base (= 0.13.b640.14eddc8)
+Conflicts: scalarizr-agent
+Filename: master/scalarizr-nimbula_0.13.b640.14eddc8_all.deb
+Size: 1748
+MD5sum: 50f35010a031bf2c6c2be987398fa454
+SHA1: 955a2095d83bff8c895fbc68231533b9583a6540
+SHA256: fc42aed4e29e8f02ab93e1c713dcc28c6b40ec7f5a416f140671f8a556713938
+SHA512: 4216c6c5e3ea36e623a7bd9ee5fff31f7582453c7b1bcd393892360b8aea300b0feb738997d1b86325c6e0b27d15823710b26932664ae1a6cb8408e9357c15f6
+Description: Scalarizr agent for Nimbula cloud
+ Need to scale? Scalr might be for you. Scalr is open source software that scales web infrastructure.
+Homepage: http://scalr.net
+

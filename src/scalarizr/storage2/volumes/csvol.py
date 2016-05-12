@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import string
 import threading
 import uuid
 
@@ -297,30 +298,12 @@ class CSVolume(base.Volume):
         with self.attach_lock:
             LOG.debug('Attaching CloudStack volume %s', volume_id)
             taken_before = base.taken_devices()
-            self._conn.attachVolume(volume_id, instance_id)
+            native_vol = self._conn.attachVolume(volume_id, instance_id)
 
-            def device_plugged():
-                # Rescan SCSI bus
-                scsi_host = '/sys/class/scsi_host'
-                for name in os.listdir(scsi_host):
-                    with open(scsi_host + '/' + name + '/scan', 'w') as fp:
-                        fp.write('- - -')
-                return base.taken_devices() > taken_before
-
-            util.wait_until(device_plugged,
-                    start_text='Checking that volume %s is available in OS' % volume_id,
-                    timeout=30,
-                    sleep=1,
-                    error_text='Volume %s attached but not available in OS' % volume_id)
-
-            devices = list(base.taken_devices() - taken_before)
-            if len(devices) > 1:
-                msg = "While polling for attached device, got multiple new devices: %s. " \
-                    "Don't know which one to select".format(devices)
-                raise Exception(msg)
-            return devices[0]
-
-        LOG.debug('Checking that volume %s is attached', volume_id)
+            if not linux.os.windows:
+                return base.wait_device_plugged(volume_id, taken_before)
+            else:
+                return string.ascii_uppercase[native_vol.deviceid]
 
 
     def _detach(self, force=False, **kwds):

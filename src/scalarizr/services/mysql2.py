@@ -6,6 +6,7 @@ import re
 import logging
 import subprocess
 import threading
+import datetime
 
 from scalarizr import linux, storage2
 from scalarizr.linux.execute import eradicate
@@ -17,6 +18,7 @@ from scalarizr.services import backup
 from scalarizr.libs import bases
 from scalarizr.handlers import transfer_result_to_backup_result
 from scalarizr.util import software
+from scalarizr.storage2 import largetransfer
 
 
 LOG = logging.getLogger(__name__)
@@ -61,6 +63,7 @@ __mysql__.update({
 
 
 class MySQLSnapBackup(backup.SnapBackup):
+
     def __init__(self, **kwds):
         super(MySQLSnapBackup, self).__init__(**kwds)
         self.on(
@@ -71,8 +74,8 @@ class MySQLSnapBackup(backup.SnapBackup):
 
     def _client(self):
         return mysql_svc.MySQLClient(
-                    __mysql__['root_user'],
-                    __mysql__['root_password'])
+            __mysql__['root_user'],
+            __mysql__['root_password'])
 
     def freeze(self, volume, state):
         self._mysql_init.start()
@@ -96,6 +99,7 @@ class MySQLSnapBackup(backup.SnapBackup):
 
 
 class MySQLSnapRestore(backup.SnapRestore):
+
     def __init__(self, **kwds):
         super(MySQLSnapRestore, self).__init__(**kwds)
         self.on(complete=self.complete)
@@ -111,10 +115,11 @@ backup.restore_types['snap_mysql'] = MySQLSnapRestore
 
 
 class XtrabackupMixin(object):
+
     def __init__(self):
         self.error_messages.update({
             'invalid_backup_type': "Invalid backup type: %s. "
-                                "Supported values are 'full' | 'incremental'"
+            "Supported values are 'full' | 'incremental'"
         })
 
     def _check_backup_type(self):
@@ -123,36 +128,37 @@ class XtrabackupMixin(object):
 
     def _client(self):
         return mysql_svc.MySQLClient(
-                    __mysql__['root_user'],
-                    __mysql__['root_password'])
+            __mysql__['root_user'],
+            __mysql__['root_password'])
 
 
 class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
+
     def __init__(self,
-                backup_type='full',
-                no_lock=False,
-                from_lsn=None,
-                compressor=None,
-                prev_cloudfs_source=None,
-                cloudfs_target=None,
-                **kwds):
+                 backup_type='full',
+                 no_lock=False,
+                 from_lsn=None,
+                 compressor=None,
+                 prev_cloudfs_source=None,
+                 cloudfs_target=None,
+                 **kwds):
         backup.Backup.__init__(self,
-                backup_type=backup_type,
-                no_lock=no_lock,
-                from_lsn=int(from_lsn or 0),
-                compressor=compressor,
-                prev_cloudfs_source=prev_cloudfs_source,
-                cloudfs_target=cloudfs_target,
-                **kwds)
+                               backup_type=backup_type,
+                               no_lock=no_lock,
+                               from_lsn=int(from_lsn or 0),
+                               compressor=compressor,
+                               prev_cloudfs_source=prev_cloudfs_source,
+                               cloudfs_target=cloudfs_target,
+                               **kwds)
         XtrabackupMixin.__init__(self)
-        self._re_lsn = re.compile(r"xtrabackup: The latest check point " \
-                            "\(for incremental\): '(\d+)'")
+        self._re_lsn = re.compile(r"xtrabackup: The latest check point "
+                                  "\(for incremental\): '(\d+)'")
         self._re_lsn_51 = re.compile(r"xtrabackup: The latest check point "
-                            "\(for incremental\): '(\d+:\d+)'")
-        self._re_binlog = re.compile(r"innobackupex: MySQL binlog position: " \
-                            "filename '([^']+)', position (\d+)")
-        self._re_slave_binlog = re.compile(r"innobackupex: MySQL slave binlog position: " \
-                            "master host '[^']+', filename '([^']+)', position (\d+)")
+                                     "\(for incremental\): '(\d+:\d+)'")
+        self._re_binlog = re.compile(r"innobackupex: MySQL binlog position: "
+                                     "filename '([^']+)', position (\d+)")
+        self._re_slave_binlog = re.compile(r"innobackupex: MySQL slave binlog position: "
+                                           "master host '[^']+', filename '([^']+)', position (\d+)")
         self._re_lsn_innodb_stat = re.compile(r"Log sequence number \d+ (\d+)")
 
         self._killed = False
@@ -166,8 +172,8 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
         kwds = {
             'stream': 'xbstream',
             # Compression is broken
-            #'compress': True,
-            #'compress_threads': os.sysconf('SC_NPROCESSORS_ONLN'),
+            # 'compress': True,
+            # 'compress_threads': os.sysconf('SC_NPROCESSORS_ONLN'),
             'ibbackup': 'xtrabackup',
             'user': __mysql__['root_user'],
             'password': __mysql__['root_password']
@@ -181,7 +187,8 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
         current_lsn = None
         if self.backup_type == 'auto':
             client = self._client()
-            innodb_stat = client.fetchone('SHOW INNODB STATUS')[0]
+            innodb_stat = client.fetchone('SHOW ENGINE INNODB STATUS')[0]
+            # innodb_stat = client.fetchone('SHOW INNODB STATUS')[0]
             for line in innodb_stat.splitlines():
                 m = self._re_lsn_innodb_stat.search(line)
                 if m:
@@ -196,7 +203,7 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
             else:
                 self._check_attr('from_lsn')
             if self.backup_type == 'incremental' or \
-                (self.backup_type == 'auto' and current_lsn and current_lsn >= self.from_lsn):
+                    (self.backup_type == 'auto' and current_lsn and current_lsn >= self.from_lsn):
                 kwds.update({
                     'incremental': True,
                     'incremental_lsn': self.from_lsn
@@ -212,17 +219,19 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
         with self._xbak_init_lock:
             if self._killed:
                 raise Error("Canceled")
-            self._xbak = innobackupex.args(__mysql__['tmp_dir'], **kwds).popen()
-            LOG.debug('Creating LargeTransfer, src=%s dst=%s', self._xbak.stdout,
-                self.cloudfs_target)
-            self._transfer = cloudfs.LargeTransfer(
-                        [self._xbak.stdout],
-                        self.cloudfs_target,
-                        compressor=self.compressor)
+            self._xbak = innobackupex.args(tmpdir=__mysql__['tmp_dir'], **kwds).popen()
+            gzip = self.compressor == 'gzip'
+            transfer_id = datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')
+            self._transfer = largetransfer.Upload(self._xbak.stdout,
+                                                  self.cloudfs_target,
+                                                  gzip=gzip, transfer_id=transfer_id)
 
         stderr_thread, stderr = cloudfs.readfp_thread(self._xbak.stderr)
 
-        manifesto = self._transfer.run()
+        self._transfer.apply_async()
+        self._transfer.join()
+        manifesto = self._transfer.manifest
+
         if self._killed:
             raise Error("Canceled")
         stderr_thread.join()
@@ -237,8 +246,8 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
 
         log_file = log_pos = to_lsn = None
         re_binlog = self._re_binlog \
-                    if int(__mysql__['replication_master']) else \
-                    self._re_slave_binlog
+            if int(__mysql__['replication_master']) else \
+            self._re_slave_binlog
         for line in stderr.splitlines():
             m = self._re_lsn.search(line) or self._re_lsn_51.search(line)
             if m:
@@ -253,13 +262,13 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
                 break
 
         rst = backup.restore(type='xtrabackup',
-                backup_type=self.backup_type,
-                from_lsn=self.from_lsn,
-                to_lsn=to_lsn,
-                cloudfs_source=manifesto.cloudfs_path,
-                prev_cloudfs_source=self.prev_cloudfs_source,
-                log_file=log_file,
-                log_pos=log_pos)
+                             backup_type=self.backup_type,
+                             from_lsn=self.from_lsn,
+                             to_lsn=to_lsn,
+                             cloudfs_source=manifesto.cloudfs_path,
+                             prev_cloudfs_source=self.prev_cloudfs_source,
+                             log_file=log_file,
+                             log_pos=log_pos)
 
         # Update manifest
         LOG.debug('rst: %s', dict(rst))
@@ -267,7 +276,7 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
         manifesto.save()
 
         LOG.info('Created %s xtrabackup. (LSN: %s..%s, log_file: %s, log_pos: %s)',
-                rst.backup_type, rst.from_lsn, rst.to_lsn, rst.log_file, rst.log_pos)
+                 rst.backup_type, rst.from_lsn, rst.to_lsn, rst.log_file, rst.log_pos)
 
         return rst
 
@@ -277,7 +286,8 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
 
         with self._xbak_init_lock:
             if self._transfer:
-                self._transfer.kill()
+                self._transfer.stop()
+                # self._transfer.kill()
             if self._xbak:
                 self._xbak_kill()
 
@@ -296,14 +306,15 @@ class XtrabackupStreamBackup(XtrabackupMixin, backup.Backup):
 
 
 class XtrabackupStreamRestore(XtrabackupMixin, backup.Restore):
+
     def __init__(self,
-                cloudfs_source=None,
-                prev_cloudfs_source=None,
-                **kwds):
+                 cloudfs_source=None,
+                 prev_cloudfs_source=None,
+                 **kwds):
         backup.Restore.__init__(self,
-                cloudfs_source=cloudfs_source,
-                prev_cloudfs_source=prev_cloudfs_source,
-                **kwds)
+                                cloudfs_source=cloudfs_source,
+                                prev_cloudfs_source=prev_cloudfs_source,
+                                **kwds)
         XtrabackupMixin.__init__(self)
         self._mysql_init = mysql_svc.MysqlInitScript()
 
@@ -331,21 +342,24 @@ class XtrabackupStreamRestore(XtrabackupMixin, backup.Restore):
         coreutils.clean_dir(__mysql__['data_dir'])
 
         LOG.info('Downloading the base backup (LSN: 0..%s)', bak.to_lsn)
-        trn = cloudfs.LargeTransfer(
-                bak.cloudfs_source,
-                __mysql__['data_dir'],
-                streamer=xbstream.args(
-                        extract=True,
-                        directory=__mysql__['data_dir']))
-        trn.run()
+
+        trn = largetransfer.Download(bak.cloudfs_source)
+        trn.apply_async()
+
+        streamer = xbstream.args(
+            extract=True,
+            directory=__mysql__['data_dir'])
+        streamer.popen(stdin=trn.output)
+
+        trn.join()
 
         LOG.info('Preparing the base backup')
         innobackupex(__mysql__['data_dir'],
-                apply_log=True,
-                redo_only=True,
-                ibbackup='xtrabackup',
-                user=__mysql__['root_user'],
-                password=__mysql__['root_password'])
+                     apply_log=True,
+                     redo_only=True,
+                     ibbackup='xtrabackup',
+                     user=__mysql__['root_user'],
+                     password=__mysql__['root_password'])
 
         if incrementals:
             inc_dir = os.path.join(__mysql__['tmp_dir'], 'xtrabackup-restore-inc')
@@ -355,38 +369,41 @@ class XtrabackupStreamRestore(XtrabackupMixin, backup.Restore):
                     os.makedirs(inc_dir)
                     inc = backup.restore(inc)
                     LOG.info('Downloading incremental backup #%d (LSN: %s..%s)', i,
-                            inc.from_lsn, inc.to_lsn)
-                    trn = cloudfs.LargeTransfer(
-                            inc.cloudfs_source,
-                            inc_dir,
-                            streamer=xbstream.args(
-                                    extract=True,
-                                    directory=inc_dir))
+                             inc.from_lsn, inc.to_lsn)
 
-                    trn.run()  # todo: Largetransfer should support custom decompressor proc
+                    trn = largetransfer.Download(inc.cloudfs_source)
+                    trn.apply_async()
+
+                    streamer = xbstream.args(
+                        extract=True,
+                        directory=inc_dir)
+                    streamer.popen(stdin=trn.output)
+
+                    trn.join()
+
                     LOG.info('Preparing incremental backup #%d', i)
                     innobackupex(__mysql__['data_dir'],
-                            apply_log=True,
-                            redo_only=True,
-                            incremental_dir=inc_dir,
-                            ibbackup='xtrabackup',
-                            user=__mysql__['root_user'],
-                            password=__mysql__['root_password'])
+                                 apply_log=True,
+                                 redo_only=True,
+                                 incremental_dir=inc_dir,
+                                 ibbackup='xtrabackup',
+                                 user=__mysql__['root_user'],
+                                 password=__mysql__['root_password'])
                     i += 1
                 finally:
                     coreutils.remove(inc_dir)
 
         LOG.info('Preparing the full backup')
         innobackupex(__mysql__['data_dir'],
-                apply_log=True,
-                user=__mysql__['root_user'],
-                password=__mysql__['root_password'])
+                     apply_log=True,
+                     user=__mysql__['root_user'],
+                     password=__mysql__['root_password'])
         coreutils.chown_r(__mysql__['data_dir'], 'mysql', 'mysql')
 
         self._mysql_init.start()
         if int(__mysql__['replication_master']):
             LOG.info("Master will reset it's binary logs, "
-                    "so updating binary log position in backup manifest")
+                     "so updating binary log position in backup manifest")
             log_file, log_pos = self._client().master_status()
             meta = mnf.meta
             meta.update({'log_file': log_file, 'log_pos': log_pos})
@@ -408,14 +425,14 @@ class MySQLDumpBackup(backup.Backup):
     '''
 
     def __init__(self,
-                cloudfs_dir=None,
-                file_per_database=True,
-                chunk_size=None,
-                **kwds):
+                 cloudfs_dir=None,
+                 file_per_database=True,
+                 chunk_size=None,
+                 **kwds):
         super(MySQLDumpBackup, self).__init__(cloudfs_dir=cloudfs_dir,
-                file_per_database=file_per_database,
-                chunk_size=chunk_size or __mysql__['mysqldump_chunk_size'],
-                **kwds)
+                                              file_per_database=file_per_database,
+                                              chunk_size=chunk_size or __mysql__['mysqldump_chunk_size'],
+                                              **kwds)
         self.features.update({
             'start_slave': False
         })
@@ -428,18 +445,20 @@ class MySQLDumpBackup(backup.Backup):
     def _run(self):
         LOG.debug("Running MySQLDumpBackup")
         client = mysql_svc.MySQLClient(
-                    __mysql__['root_user'],
-                    __mysql__['root_password'])
+            __mysql__['root_user'],
+            __mysql__['root_password'])
         self._databases = client.list_databases()
 
         with self._run_lock:
             if self._killed:
                 raise Error("Canceled")
-            self.transfer = cloudfs.LargeTransfer(self._gen_src, self._dst,
-                                    streamer=None, chunk_size=self.chunk_size)
-        result = self.transfer.run()
-        if not result:
-            raise Error("Error while transfering to cloud storage")
+            src_gen = self._gen_src()
+            transfer_id = datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')
+            self.transfer = largetransfer.Upload(src_gen, self._dst,
+                                                 chunk_size=self.chunk_size, transfer_id=transfer_id)
+        self.transfer.apply_async()
+        self.transfer.join()
+        result = self.transfer.manifest
 
         def log_stderr(popen):
             LOG.debug("mysqldump log_stderr communicate")
@@ -458,24 +477,24 @@ class MySQLDumpBackup(backup.Backup):
             if retcode:
                 mysqldump_errors.append('%s: "%s"' % (db_name, err))
         if mysqldump_errors:
-            raise Error("Mysqldump has returned a non-zero code.\n" + 
+            raise Error("Mysqldump has returned a non-zero code.\n" +
                         '\n'.join(mysqldump_errors))
 
         parts = transfer_result_to_backup_result(result)
-        return backup.restore(type='mysqldump', 
-                cloudfs_source=result.cloudfs_path, 
-                parts=parts,
-                description=self.description,
-                tags=self.tags)
+        return backup.restore(type='mysqldump',
+                              cloudfs_source=result.cloudfs_path,
+                              parts=parts,
+                              description=self.description,
+                              tags=self.tags)
 
     def _gen_src(self):
         if self.file_per_database:
             for db_name in self._databases:
                 self._current_db = db_name
                 params = __mysql__['mysqldump_options'].split()
-                params.extend(['--user', __mysql__['root_user'], 
-                        '--password={0}'.format(__mysql__['root_password']), 
-                        db_name])
+                params.extend(['--user', __mysql__['root_user'],
+                               '--password={0}'.format(__mysql__['root_password']),
+                               db_name])
                 _mysqldump.args(*params)
                 with self._popen_creation_lock:
                     if self._killed:
@@ -507,16 +526,17 @@ class MySQLDumpBackup(backup.Backup):
 
         with self._run_lock:
             if self.transfer:
-                self.transfer.kill()
+                self.transfer.stop()
             map(eradicate, self._popens)
         LOG.debug("...killed MySQLDumpBackup")
 
 
 class MySQLDumpRestore(backup.Backup):
-    def __init__(self, 
-            cloudfs_source=None,
-            parts=None,
-            **kwds):
+
+    def __init__(self,
+                 cloudfs_source=None,
+                 parts=None,
+                 **kwds):
         super(MySQLDumpRestore, self).__init__(
             cloudfs_source=cloudfs_source,
             parts=parts,
@@ -527,6 +547,7 @@ backup.restore_types['mysqldump'] = MySQLDumpRestore
 
 
 class User(bases.ConfigDriven):
+
     def __init__(self, user=None, password=None, privileges='*'):
         pass
 
@@ -573,11 +594,11 @@ class Exec(object):
     def popen(self, **kwds):
         self.check()
         kwds['close_fds'] = True
-        if not 'stdin' in kwds:
+        if 'stdin' not in kwds:
             kwds['stdin'] = subprocess.PIPE
-        if not 'stdout' in kwds:
+        if 'stdout' not in kwds:
             kwds['stdout'] = subprocess.PIPE
-        if not 'stderr' in kwds:
+        if 'stderr' not in kwds:
             kwds['stderr'] = subprocess.PIPE
         return subprocess.Popen(self.cmd, **kwds)
 
@@ -596,26 +617,30 @@ class PerconaExec(Exec):
         if linux.os['family'] in ('RedHat', 'Oracle') and linux.os['version'] >= (6, 0):
             # Avoid "Can't locate Time/HiRes.pm in @INC"
             # with InnoDB Backup Utility v1.5.1-xtrabackup
-            pkgmgr.installed('perl-Time-HiRes')         
+            pkgmgr.installed('perl-Time-HiRes')
 
         mgr = pkgmgr.package_mgr()
-        if not 'percona' in mgr.repos():
+        if 'percona' not in mgr.repos():
             if linux.os['family'] in ('RedHat', 'Oracle'):
-                url = 'http://www.percona.com/downloads/percona-release/percona-release-0.0-1.%s.rpm' % linux.os['arch']
+                url = 'http://www.percona.com/downloads/percona-release/percona-release-0.0-1.%s.rpm' % linux.os[
+                    'arch']
                 pkgmgr.YumPackageMgr().localinstall(url)
                 if linux.os.amazon:
                     linux.system(("sed -i 's/\$releasever/latest/g' "
-                                    "/etc/yum.repos.d/Percona.repo"), shell=True)
+                                  "/etc/yum.repos.d/Percona.repo"), shell=True)
+                if linux.os.scientific:
+                    linux.system(("sed -i 's/\$releasever/{}/g' "
+                                  "/etc/yum.repos.d/Percona.repo".format(linux.os['version'].version[0])), shell=True)
             else:
                 try:
                     codename = linux.os['lsb_codename']
                 except KeyError:
                     codename = linux.ubuntu_release_to_codename[linux.os['lsb_release']]
                 pkgmgr.apt_source(
-                        'percona.list', 
-                        ['deb http://repo.percona.com/apt %s main' % codename],
-                        gpg_keyserver='hkp://keys.gnupg.net',
-                        gpg_keyid='CD2EFD2A')
+                    'percona.list',
+                    ['deb http://repo.percona.com/apt %s main' % codename],
+                    gpg_keyserver='hkp://keys.gnupg.net',
+                    gpg_keyid='CD2EFD2A')
             mgr.updatedb()
         if software.mysql_software_info().version < (5, 5):
             self.package = 'percona-xtrabackup-21'
@@ -631,8 +656,8 @@ xbstream = PerconaExec('/usr/bin/xbstream')
 
 def my_print_defaults(*option_groups):
     out = linux.system(linux.build_cmd_args(
-            executable='/usr/bin/my_print_defaults',
-            params=option_groups))[0]
+        executable='/usr/bin/my_print_defaults',
+        params=option_groups))[0]
     ret = {}
     for line in out.splitlines():
         cols = line.split('=')
@@ -646,9 +671,9 @@ def my_print_defaults(*option_groups):
 def mysqldump(*databases, **long_kwds):
     output = long_kwds.pop('output', None)
     cmd = linux.build_cmd_args(
-            executable='/usr/bin/mysqldump',
-            long=long_kwds,
-            params=databases)
+        executable='/usr/bin/mysqldump',
+        long=long_kwds,
+        params=databases)
     kwds = {}
     if output:
         kwds['stdout'] = open(output, 'w+')
@@ -657,9 +682,9 @@ def mysqldump(*databases, **long_kwds):
 
 def mysqlbinlog(log_file, **log_kwds):
     return linux.system(linux.build_cmd_args(
-            executable='/usr/bin/mysqlbinlog',
-            long=log_kwds,
-            params=[log_file]))
+        executable='/usr/bin/mysqlbinlog',
+        long=log_kwds,
+        params=[log_file]))
 
 
 def mysqlbinlog_head():
@@ -671,10 +696,10 @@ def mysqlbinlog_head():
     '''
     my_defaults = my_print_defaults('mysqld')
     binlog_dir = os.path.dirname(my_defaults['log_bin']) \
-                if my_defaults['log_bin'][0] == '/' \
-                else my_defaults['datadir']
+        if my_defaults['log_bin'][0] == '/' \
+        else my_defaults['datadir']
     binlog_index = os.path.join(binlog_dir,
-                    os.path.basename(my_defaults['log_bin'])) + '.index'
+                                os.path.basename(my_defaults['log_bin'])) + '.index'
     with open(binlog_index) as fp:
         binlog_1 = fp.readline().strip()
         binlog_1 = os.path.join(binlog_dir, binlog_1)
@@ -682,7 +707,7 @@ def mysqlbinlog_head():
     # @see http://dev.mysql.com/doc/internals/en/binary-log-versions.html
     stop_position = 91
     out = mysqlbinlog(binlog_1, verbose=True,
-                    stop_position=stop_position)[0]
+                      stop_position=stop_position)[0]
     end_log_pos_re = re.compile(r'end_log_pos\s+(\d+)')
     for line in out.splitlines():
         m = end_log_pos_re.search(line)  # must be search?
@@ -690,13 +715,13 @@ def mysqlbinlog_head():
             return (os.path.basename(binlog_1), m.group(1))
 
     msg = 'Failed to read FORMAT_DESCRIPTION_EVENT ' \
-            'at the top of the %s' % binlog_1
+        'at the top of the %s' % binlog_1
     raise Error(msg)
 
 
 def innodb_enabled():
     opts = my_print_defaults('mysqld')
-    return not (opts.get('ignore-builtin-innodb') or \
-                opts.get('ignore_builtin_innodb') or \
-                opts.get('skip-innodb') or \
+    return not (opts.get('ignore-builtin-innodb') or
+                opts.get('ignore_builtin_innodb') or
+                opts.get('skip-innodb') or
                 opts.get('skip_innodb'))

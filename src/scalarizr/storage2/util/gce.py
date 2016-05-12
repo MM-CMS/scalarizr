@@ -24,6 +24,11 @@ def get_op_status(conn, proj_id, op_name, zone=None, fields=None):
         return conn.globalOperations().get(**kwargs).execute()
 
 
+def get_disktype(conn, project_id, zone, disktype):
+    return conn.diskTypes().get(project=project_id, 
+        zone=zone, diskType=disktype).execute()
+
+
 def wait_for_operation(connection, project_id, operation_name,
                             zone=None, status_to_wait=("DONE",), timeout=3600):
 

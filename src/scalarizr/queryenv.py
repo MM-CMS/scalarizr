@@ -1,4 +1,3 @@
-from __future__ import with_statement
 '''
 Created on Dec 23, 2009
 
@@ -6,21 +5,34 @@ Created on Dec 23, 2009
 '''
 import binascii
 import logging
-import os
 import sys
-import urllib
-import urllib2
+import requests
+import datetime
 import time
+import json
 import HTMLParser
+import os
 from copy import deepcopy
 
 from scalarizr.util import cryptotool
-from scalarizr.util import urltool
+from scalarizr.node import __node__
+from scalarizr.config import STATE
 
 if sys.version_info[0:2] >= (2, 7):
     from xml.etree import ElementTree as ET
 else:
     from scalarizr.externals.etree import ElementTree as ET
+
+# Disable SSL warnings from requests
+# [ SCALARIZR-2009 ]
+try:
+    import urllib3
+    urllib3.disable_warnings()
+except ImportError:
+    requests.packages.urllib3.disable_warnings()
+
+
+API_VERSION_EXPIRE_TIME = 60*60*24
 
 
 class QueryEnvError(Exception):
@@ -32,12 +44,13 @@ class InvalidSignatureError(QueryEnvError):
 
 
 class QueryEnvService(object):
-    _logger = None
 
+    _logger = None
     url = None
     api_version = None
     key_path = None
     server_id = None
+    agent_version = None
 
     def _log_parsed_response(self, response):
         self._logger.debug("QueryEnv response (parsed): %s", response)
@@ -48,6 +61,9 @@ class QueryEnvService(object):
                  key_path=None,
                  api_version='2012-04-17',
                  autoretry=True):
+        # Resolve cycle import
+        import scalarizr
+        self.agent_version = scalarizr.__version__
         self._logger = logging.getLogger(__name__)
         self.url = url if url[-1] != "/" else url[0:-1]
         self.server_id = server_id
@@ -56,81 +72,88 @@ class QueryEnvService(object):
         self.htmlparser = HTMLParser.HTMLParser()
         self.autoretry = autoretry
 
-    def fetch(self, command, params=None, log_response=True):
-        """
-        @return object
-        """
-        # Perform HTTP request
+    def version_supported(self, thatversion):
+        thatversion = datetime.date(*map(int, thatversion.split('-')))
+        thisversion = datetime.date(*map(int, self.api_version.split('-')))
+        return thisversion >= thatversion
+
+    def _remove_private_globvars(self, list_gv_response):
+        try:
+            xml = ET.XML(list_gv_response)
+            glob_vars = xml[0]
+            i = 0
+            for _ in xrange(len(glob_vars)):
+                var = glob_vars[i]
+                if int(var.attrib.get('private', 0)) == 1:
+                    glob_vars.remove(var)
+                    continue
+                i += 1
+            return ET.tostring(xml)
+        except (BaseException, Exception) as e:
+            self._logger.debug("Exception occured while parsing "
+                "list-global-variables response: %s", e.message)
+            if isinstance(e, ET.ParseError):
+                raise
+            return list_gv_response
+
+    def _prepare_request(self, command, params=None):
         url = "%s/%s/%s" % (self.url, self.api_version, command)
-        self._logger.debug('Call QueryEnv: %s', url)
         request_body = {}
         request_body["operation"] = command
         request_body["version"] = self.api_version
         if params:
-            for key, value in params.items():
+            for key, value in list(params.items()):
                 request_body[key] = value
 
-        file = open(self.key_path)
-        key = binascii.a2b_base64(file.read())
-        file.close()
-
+        with open(self.key_path, 'r') as fp:
+            key = binascii.a2b_base64(fp.read())
         signature, timestamp = cryptotool.sign_http_request(request_body, key)
 
-        post_data = urllib.urlencode(request_body)
         headers = {
             "Date": timestamp,
             "X-Signature": signature,
-            "X-Server-Id": self.server_id
+            "X-Server-Id": self.server_id,
+            "X-Scalr-Agent-Version": self.agent_version
         }
+
+        return (url, request_body, headers)
+
+    def _process_request_exception(self, exc):
+        if isinstance(exc, requests.HTTPError):
+            if exc.response.status_code == 403:
+                raise InvalidSignatureError(str(exc))
+        msg = 'QueryEnv failed: {}'.format(exc)
+        if self.autoretry:
+            self._logger.warn(msg)
+        else:
+            raise QueryEnvError(msg)
+
+
+    def fetch(self, command, params=None, log_response=True):
+        url, request_body, headers = self._prepare_request(command, params)
+
+        self._logger.debug('Call QueryEnv: %s', url)
+
         response = None
         wait_seconds = 30
-        msg_wait = 'Waiting %d seconds before the next try' % wait_seconds
         while True:
             try:
-                self._logger.debug("QueryEnv request: %s", post_data)
-                opener = urllib2.build_opener(urltool.HTTPRedirectHandler)
-                req = urllib2.Request(url, post_data, headers)
-                response = opener.open(req)
+                self._logger.debug("QueryEnv request: %s", request_body)
+                response = requests.get(url, params=request_body, headers=headers, verify=False)
+                response.raise_for_status()
                 break
             except:
-                e = sys.exc_info()[1]
-                if isinstance(e, urllib2.HTTPError):
-                    resp_body = e.read() if e.fp is not None else ""
-                    msg = resp_body or e.msg
-                    if "Signature doesn't match" in msg:
-                        raise InvalidSignatureError(msg)
-                    if "not supported" in msg:
-                        raise
-                    if e.code in (509, 400, 403) or not self.autoretry:
-                        raise QueryEnvError('QueryEnv failed: %s' % msg)
-                    self._logger.warn('QueryEnv failed. HTTP %s. %s. %s', e.code, msg, msg_wait)
-                else:
-                    self._logger.warn('QueryEnv failed. %s. %s', e, msg_wait)
+                self._process_request_exception(sys.exc_info()[1])
                 self._logger.warn('Sleep %s seconds before next attempt...', wait_seconds)
                 time.sleep(wait_seconds)
 
-        resp_body = response.read()
+        resp_body = response.text
         resp_body = self.htmlparser.unescape(resp_body)
-        resp_body = resp_body.encode('utf-8')
 
         if log_response:
             log_body = resp_body
             if command == 'list-global-variables':
-                try:
-                    xml = ET.XML(resp_body)
-                    glob_vars = xml[0]
-                    i = 0
-                    for _ in xrange(len(glob_vars)):
-                        var = glob_vars[i]
-                        if int(var.attrib.get('private', 0)) == 1:
-                            glob_vars.remove(var)
-                            continue
-                        i += 1
-                    log_body = ET.tostring(xml)
-                except (BaseException, Exception), e:
-                    self._logger.debug("Exception occured while parsing list-global-variables response: %s" % e.message)
-                    if isinstance(e, ET.ParseError):
-                        raise
+                log_body = self._remove_private_globvars(log_body)
             self._logger.debug("QueryEnv response: %s", log_body)
         return resp_body
 
@@ -157,7 +180,9 @@ class QueryEnvService(object):
         parameters = {}
         if name:
             parameters["name"] = name
-        return {'params': self._request("list-role-params", parameters, self._read_list_role_params_response)}
+        return {'params': self._request("list-role-params",
+            parameters,
+            self._read_list_role_params_response)}
 
     def list_farm_role_params(self, farm_role_id=None):
         """
@@ -166,10 +191,16 @@ class QueryEnvService(object):
         parameters = {}
         if farm_role_id:
             parameters["farm-role-id"] = farm_role_id
-        response = self._request("list-farm-role-params",
-                                 parameters,
-                                 self._read_list_farm_role_params_response,
-                                 log_response=False)
+        if self.version_supported('2015-04-10'):
+            response = self._request('list-farm-role-params-json',
+                parameters,
+                self._read_json,
+                log_response=False)
+        else:
+            response = self._request("list-farm-role-params",
+                parameters,
+                self._read_list_farm_role_params_response,
+                log_response=False)
 
         response_log_copy = deepcopy(response)
         try:
@@ -230,7 +261,9 @@ class QueryEnvService(object):
         parameters = {}
         if certificate_id:
             parameters['id'] = certificate_id
-        return self._request("get-https-certificate", parameters, self._read_get_https_certificate_response)
+        return self._request("get-https-certificate",
+            parameters,
+            self._read_get_https_certificate_response)
 
     def list_ebs_mountpoints(self):
         """
@@ -261,7 +294,9 @@ class QueryEnvService(object):
         """
         @return dict
         """
-        return {'params': self._request("get-global-config", {}, self._read_get_global_config_response)}
+        return {'params': self._request("get-global-config",
+            {},
+            self._read_get_global_config_response)}
 
     def list_global_variables(self):
         '''
@@ -275,14 +310,14 @@ class QueryEnvService(object):
         self._log_parsed_response(glob_vars['public'])
         return glob_vars
 
-#
-
     def _request(self,
                  command,
-                 params={},
+                 params=None,
                  response_reader=None,
                  response_reader_args=None,
                  log_response=True):
+        if params is None:
+            params = {}
         xml = self.fetch(command, params, log_response=False)
         response_reader_args = response_reader_args or ()
         try:
@@ -290,9 +325,14 @@ class QueryEnvService(object):
             if log_response:
                 self._log_parsed_response(parsed_response)
             return parsed_response
-        except (Exception, BaseException), e:
+        except (Exception, BaseException):
             self._logger.debug("QueryEnv response: %s", xml)
             raise
+
+
+    def _read_json(self, json_string):
+        return json.loads(json_string)
+
 
     def _read_list_global_variables(self, xml):
         '''
@@ -303,10 +343,10 @@ class QueryEnvService(object):
         glob_vars = {}
         values = data.get('values', {})
         glob_vars['public'] = dict((k, v.encode('utf-8') if v else '')
-                                   for k, v in values.items())
+                                   for k, v in list(values.items()))
         private_values = data.get('private_values', {})
         glob_vars['private'] = dict((k, v.encode('utf-8') if v else '')
-                                    for k, v in private_values.items())
+                                    for k, v in list(private_values.items()))
         return glob_vars
 
     def _read_get_global_config_response(self, xml):
@@ -342,7 +382,8 @@ class QueryEnvService(object):
         for mp in mpoints:
             create_fs = bool(int(mp["createfs"]))
             is_array = bool(int(mp["isarray"]))
-            volumes = [Volume(vol_data["volume-id"], vol_data["device"]) for vol_data in mp["volumes"]]
+            volumes = [Volume(vol_data["volume-id"], vol_data["device"])
+                for vol_data in mp["volumes"]]
             ret.append(Mountpoint(mp["name"], mp["dir"], create_fs, is_array, volumes))
         return ret
 
@@ -522,7 +563,7 @@ class QueryEnvResult(object):
     @classmethod
     def from_dict(cls, dict_data):
         kwargs = {}
-        for k, v in dict_data.items():
+        for k, v in list(dict_data.items()):
             member = k.replace('-', '_')
             if hasattr(cls, member):
                 kwargs[member] = v
@@ -627,19 +668,49 @@ class ScalingMetric(object):
 
     retrieve_method = property(_get_retrieve_method, _set_retrieve_method)
 
-    def __str__(self):
-        return 'qe:ScalingMetric(%s, id: %s, path: %s:%s)' % (self.name, self.id, self.path, self.retrieve_method)
+    def __repr__(self):
+        return 'ScalingMetric(%s, id: %s, path: %s:%s)' % \
+            (self.name, self.id, self.path, self.retrieve_method)
+
+
+def _is_api_version_expired(api_version):
+    current_time = time.time()
+    saved_time = float(api_version['timestamp'])
+    return current_time - saved_time >= API_VERSION_EXPIRE_TIME
+
+
+def new_queryenv(url=None, server_id=None, crypto_key_path=None, autoretry=True):
+    queryenv_creds = (url or __node__['queryenv_url'],
+        server_id or __node__['server_id'],
+        crypto_key_path or os.path.join(__node__['etc_dir'], __node__['crypto_key_path']))
+    saved_api_version = STATE['queryenv.api_version']
+
+    if not saved_api_version or _is_api_version_expired(saved_api_version):
+        queryenv_svc = QueryEnvService(*queryenv_creds)
+        api_version = queryenv_svc.get_latest_version()
+        STATE['queryenv.api_version'] = {'version': api_version, 'timestamp': time.time()}
+    else:
+        api_version = saved_api_version['version']
+
+    return QueryEnvService(*queryenv_creds, api_version=api_version, autoretry=autoretry)
 
 
 def xml2dict(el):
     if el.attrib:
+        # Commented until we agree about new tags format
+        # if el.tag == 'tags' and el.attrib.get('version') == '2.0':
+        #     ret = {}
+        #     for ch in el:
+        #         ret[ch.attrib['name']] = ch.attrib['value']
+        #     return ret
+
         ret = el.attrib
         if el.tag in ['settings', 'variables'] and len(el):
             c = el[0]
             key = ''
-            if c.attrib.has_key('key'):
+            if 'key' in c.attrib:
                 key = 'key'
-            elif c.attrib.has_key('name'):
+            elif 'name' in c.attrib:
                 key = 'name'
 
             ret['values'] = {}
@@ -653,9 +724,9 @@ def xml2dict(el):
         if el.tag in ['settings', 'variables']:
             c = el[0]
             key = ''
-            if c.attrib.has_key('key'):
+            if 'key' in c.attrib:
                 key = 'key'
-            elif c.attrib.has_key('name'):
+            elif 'name' in c.attrib:
                 key = 'name'
 
             private_values = {}
@@ -663,7 +734,7 @@ def xml2dict(el):
             for ch in el:
                 try:
                     is_private = int(ch.attrib.get('private', 0))
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     is_private = False
                 if is_private:
                     private_values[ch.attrib[key]] = ch.text
@@ -688,7 +759,7 @@ def xml2dict(el):
             return list(xml2dict(ch) for ch in el)
         else:
             return dict((ch.tag, xml2dict(ch)) for ch in el)
-    elif el.tag in ('roles', 'hosts', 'scripts', 'volumes',  'params', 
+    elif el.tag in ('roles', 'hosts', 'scripts', 'volumes', 'params',
                     'mountpoints', 'vhosts', 'metrics', 'variables') \
         and not el.text:  # TODO: add other list tags to return [] instead of None
         return []

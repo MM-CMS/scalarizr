@@ -1,26 +1,14 @@
-from __future__ import with_statement
-
 import os
-import re
 import ConfigParser
 import sys
 import copy
-try:
-    import json
-except ImportError:
-    import simplejson as json 
+import json
+import logging
 
 from scalarizr import linux
-from scalarizr import util
 
 
-if linux.os.windows_family:
-    base_dir = r'C:\Program Files\Scalarizr\etc'
-else:
-    base_dir = '/etc/scalr'
-private_dir = base_dir + '/private.d'
-public_dir = base_dir + '/public.d'
-storage_dir = private_dir + '/storage'
+LOG = logging.getLogger(__name__)
 
 
 class Store(object):
@@ -40,8 +28,9 @@ class Compound(dict):
     pyline: disable=E1101
     '''
     def __init__(self, patterns=None):
+        super(Compound, self).__init__()
         patterns = patterns or {}
-        for pattern, store in patterns.items():
+        for pattern, store in list(patterns.items()):
             keys = pattern.split(',')
             for key in keys:
                 super(Compound, self).__setitem__(key, store)
@@ -53,18 +42,22 @@ class Compound(dict):
             raise AttributeError(name)
 
     def __setitem__(self, key, value):
+        keys = key.split(',')
+        if len(keys) > 1:
+            for key in keys:
+                self[key] = value
+            return
         try:
             value_now = dict.__getitem__(self, key)
         except KeyError:
             value_now = None
-        if isinstance(value_now, Store):
+        if isinstance(value_now, Store) and not isinstance(value, Store):
             value_now.__setitem__(key, value)
         else:
             super(Compound, self).__setitem__(key, value)
 
-
     def __getitem__(self, key):
-        value =  dict.__getitem__(self, key)
+        value = dict.__getitem__(self, key)
         if isinstance(value, Store):
             return value.__getitem__(key)
         else:
@@ -80,7 +73,7 @@ class Compound(dict):
         return ret
 
     def update(self, values):
-        for key, value in values.items():
+        for key, value in list(values.items()):
             self[key] = value
 
     def __repr__(self):
@@ -94,11 +87,12 @@ class Compound(dict):
 
 
 class Json(Store):
+
     def __init__(self, filename, fn):
         '''
         Example:
-        jstore = Json('/etc/scalr/private.d/storage/mysql.json', 
-                                'scalarizr.storage2.volume')
+        jstore = Json('/etc/scalr/private.d/storage/mysql.json',
+            'scalarizr.storage2.volume')
         '''
         self.filename = filename
         self.fn = fn
@@ -110,13 +104,12 @@ class Json(Store):
                 with open(self.filename, 'r') as fp:
                     kwds = json.load(fp)
             except:
-                raise KeyError(key)
+                raise KeyError('{}: {}'.format(key, sys.exc_info()[1]))
             else:
                 if isinstance(self.fn, basestring):
                     self.fn = _import(self.fn)
                 self._obj = self.fn(**kwds)
         return self._obj
-
 
     def __setitem__(self, key, value):
         self._obj = value
@@ -131,49 +124,69 @@ class Json(Store):
 
 class Ini(Store):
     def __init__(self, filenames, section, mapping=None):
-        if not hasattr(filenames, '__iter__'):
+        if not hasattr(filenames, '__iter__') or isinstance(filenames, basestring):
             filenames = [filenames]
         self.filenames = filenames
+        self.saved_mtimes = [0 for _ in range(0, len(filenames))]
         self.section = section
-        self.ini = None
+        self.ini = ConfigParser.ConfigParser() 
         self.mapping = mapping or {}
 
-
-    def _reload(self, only_last=False):
-        self.ini = ConfigParser.ConfigParser()
-        if only_last:
-            self.ini.read(self.filenames[-1])
-        else:
-            for filename in self.filenames:
+    def _reload(self):
+        mtimes = [os.path.exists(filename) and os.stat(filename).st_mtime or 0 \
+                for filename in self.filenames]
+        # LOG.debug('mtimes: {} saved_mtimes: {}'.format(mtimes, self.saved_mtimes))
+        if any(mtimes[i] > self.saved_mtimes[i] \
+                for i in range(0, len(self.filenames))):
+            self.ini = ConfigParser.ConfigParser() 
+            for i, filename in enumerate(self.filenames):
                 if os.path.exists(filename):
+                    LOG.debug('Reloading {}'.format(filename))
                     self.ini.read(filename)
+                self.saved_mtimes[i] = mtimes[i]
 
 
     def __getitem__(self, key):
         self._reload()
+        if not self.ini:
+            raise KeyError(key)
         if key in self.mapping:
             key = self.mapping[key]
         try:
-            return self.ini.get(self.section, key)
-        except ConfigParser.Error:
-            raise KeyError(key)
-
+            val = self.ini.get(self.section, key)
+            # LOG.debug('Get {}.{} is {}'.format(self.section, key, val))
+            return val
+        except ConfigParser.Error as e:
+            raise KeyError, '{}: {}'.format(key, e), sys.exc_info()[2]
 
     def __setitem__(self, key, value):
+        self._reload()
         if value is None:
             value = ''
         elif isinstance(value, bool):
             value = str(int(value))
         else:
             value = str(value)
-        self._reload(only_last=True)
+
+        filename = self.filenames[-1]
+        ini = ConfigParser.ConfigParser()
+        if os.path.exists(filename):
+            ini.read(filename)
+
+        if not ini.has_section(self.section):
+            ini.add_section(self.section)
         if not self.ini.has_section(self.section):
             self.ini.add_section(self.section)
+
         if key in self.mapping:
             key = self.mapping[key]
+        # LOG.debug('Set {}.{}={} in {}'.format(
+        #        self.section, key, value, filename))
+        ini.set(self.section, key, value)
         self.ini.set(self.section, key, value)
-        with open(self.filenames[0], 'w+') as fp:
-            self.ini.write(fp)
+        with open(filename, 'w+') as fp:
+            ini.write(fp)
+
 
 
 class RedisIni(Ini):
@@ -198,20 +211,18 @@ class RedisIni(Ini):
 
 
 class IniOption(Ini):
-    def __init__(self, filenames, section, option, 
+    def __init__(self, filenames, section, option,
                     getfilter=None, setfilter=None):
         self.option = option
         self.getfilter = getfilter
         self.setfilter = setfilter
         super(IniOption, self).__init__(filenames, section)
 
-
     def __getitem__(self, key):
         value = super(IniOption, self).__getitem__(self.option)
         if self.getfilter:
             return self.getfilter(value)
         return value
-
 
     def __setitem__(self, key, value):
         if self.setfilter:
@@ -223,14 +234,12 @@ class File(Store):
     def __init__(self, filename):
         self.filename = filename
 
-
     def __getitem__(self, key):
         try:
             with open(self.filename) as fp:
                 return fp.read().strip()
-        except:
-            raise KeyError(key)
-
+        except IOError as e:
+            raise KeyError('{}: {}'.format(key, e))
 
     def __setitem__(self, key, value):
         with open(self.filename, 'w+') as fp:
@@ -241,10 +250,8 @@ class BoolFile(Store):
     def __init__(self, filename):
         self.filename = filename
 
-
     def __getitem__(self, key):
         return os.path.isfile(self.filename)
-
 
     def __setitem__(self, key, value):
         if value:
@@ -276,11 +283,11 @@ class State(Store):
 
 
 class Attr(Store):
+
     def __init__(self, module, attr):
         self.module = module
         self.attr = attr
         self.getter = None
-
 
     def __getitem__(self, key):
         try:
@@ -295,14 +302,15 @@ class Attr(Store):
                     return getattr(base, path[-1])
                 self.getter = getter
         except:
-            raise KeyError(key) 
+            raise KeyError('{}: {}'.format(key, sys.exc_info()[1]))
         return self.getter()
 
 
 class Call(Attr):
+
     def __getitem__(self, key):
         attr = Attr.__getitem__(self, key)
-        return attr()   
+        return attr()
 
 
 def _import(objectstr):
@@ -318,116 +326,166 @@ def _import(objectstr):
             raise ImportError('No module named %s' % attr)
 
 
-class ScalrVersion(Store):
-    pass
+# FOR FUTURE USE
+# class DelayedCall(Store):
+
+#     def __init__(self, function, cache=False):
+#         self._function = function
+#         self._was_called = False
+#         self._cache = cache
+#         self._last_value = None
+
+#     def __getitem__(self, key):
+#         if self._cache and self._was_called:
+#             return self._last_value
+#         self._was_called = True
+#         self._last_value = self._function()
+#         return self._last_value
 
 
-node = {
-        'server_id,role_id,farm_id,farm_role_id,env_id,role_name,server_index,queryenv_url':
-                                Ini(os.path.join(private_dir, 'config.ini'), 'general'),
-        'message_format,producer_url': Ini(os.path.join(private_dir, 'config.ini'), 'messaging_p2p'),
-        'platform_name,crypto_key_path': Ini(os.path.join(public_dir, 'config.ini'), 'general'),
-        'platform': Attr('scalarizr.bus', 'bus.platform'),
-        'behavior': IniOption([public_dir + '/config.ini', private_dir + '/config.ini'], 
-                              'general', 'behaviour',
-                              lambda val: val.strip().split(','),
-                              lambda val: ','.join(val)),
-        'public_ip': Call('scalarizr.bus', 'bus.platform.get_public_ip'),
-        'private_ip': Call('scalarizr.bus', 'bus.platform.get_private_ip'),
-        'state': StateFile(private_dir + '/.state'),
-        'rebooted': BoolFile(private_dir + '/.reboot'),
-        'halted': BoolFile(private_dir + '/.halt'),
-        'cloud_location' : IniOption(private_dir + '/config.ini', 'general', 'region'),
-}
+__node__ = Compound()
+
+
+node = {}
+
+
 if linux.os.windows_family:
-    node['install_dir'] = r'C:\Program Files\Scalarizr' 
-    node['etc_dir'] = os.path.join(node['install_dir'], 'etc')
-    node['log_dir'] = os.path.join(node['install_dir'], r'var\log')
+    node['install_dir'] = 'C:\\opt\\scalarizr\\current'
+    self_dir = os.path.normpath(os.path.join(node['install_dir'], '..\\'))
+    node['etc_dir'] = os.path.join(self_dir, 'etc')
+    node['log_dir'] = os.path.join(self_dir, 'var\\log')
+    node['run_dir'] = os.path.join(self_dir, 'var\\run')
+    node['updclient'] = {'cache_dir': os.path.join(self_dir, 'var\\cache\\scalr\\updclient\\pkgmgr')}
 else:
     node['install_dir'] = '/opt/scalarizr'
     node['etc_dir'] = '/etc/scalr'
     node['log_dir'] = '/var/log'
-node['embedded_bin_dir'] = os.path.join(node['install_dir'], 'embedded', 'bin')
+    node['run_dir'] = '/var/run'
+    node['updclient'] = {'cache_dir': "/var/cache/scalr/updclient/pkgmgr"}
 
-node['share_dir'] = util.firstmatched(
-    lambda p: os.access(p, os.F_OK), [
-        os.path.join(node['install_dir'], 'share'),
+
+def reload_params(default=False):
+    if default:
+        __node__.update(node)
+
+    private_dir = __node__['etc_dir'] + '/private.d'
+    public_dir = __node__['etc_dir'] + '/public.d'
+    __node__['public_dir'] = public_dir
+    __node__['private_dir'] = private_dir
+    __node__['storage_dir'] = __node__['etc_dir'] + '/storage'
+    __node__['scripts_dir'] = os.path.join(__node__['install_dir'], 'scripts')
+
+    __node__['global_timeout'] = 2400
+
+    __node__.update({
+        'server_id,role_id,farm_id,farm_role_id,env_id,role_name,server_index,'
+        'queryenv_url,cloud_storage_path':
+            Ini(os.path.join(private_dir, 'config.ini'), 'general'),
+        'message_format,producer_url':
+            Ini(os.path.join(private_dir, 'config.ini'), 'messaging_p2p'),
+        'platform_name,crypto_key_path': Ini(os.path.join(public_dir, 'config.ini'), 'general'),
+        'platform': Attr('scalarizr.bus', 'bus.platform'),
+        'public_ip': Call('scalarizr.bus', 'bus.platform.get_public_ip'),
+        'private_ip': Call('scalarizr.bus', 'bus.platform.get_private_ip'),
+        'behavior': IniOption([public_dir + '/config.ini', private_dir + '/config.ini'],
+            'general', 'behaviour',
+            lambda val: val.strip().split(','),
+            ','.join),
+        'running': False,
+        'state': StateFile(private_dir + '/.state'),
+        'rebooted': BoolFile(private_dir + '/.reboot'),
+        'halted': BoolFile(private_dir + '/.halt'),
+        'cloud_location' : IniOption(private_dir + '/config.ini', 'general', 'region'),
+        'periodical_executor': Attr('scalarizr.bus', 'bus.periodical_executor')})
+
+    __node__['embedded_bin_dir'] = os.path.join(__node__['install_dir'], 'embedded', 'bin')
+
+    for d in (os.path.join(__node__['install_dir'], 'share'),
         '/usr/share/scalr',
-        '/usr/local/share/scalr'
-    ], 
-    os.path.join(node['install_dir'], 'share')
-)
+        '/usr/local/share/scalr'):
+        if os.access(d, os.F_OK):
+            __node__['share_dir'] = d
+            break
+    else:
+        __node__['share_dir'] = os.path.join(__node__['install_dir'], 'share')
 
-
-node['defaults'] = {
-    'base': {
-        'api_port': 8010,
-        'messaging_port': 8013
-    }
-}
-
-node['base'] = {
-}
-
-for behavior in ('mysql', 'mysql2', 'percona', 'mariadb'):
-    section = 'mysql2' if behavior in ('percona', 'mariadb') else behavior
-    node[behavior] = Compound({
-            'volume,volume_config': 
-                            Json('%s/storage/%s.json' % (private_dir, 'mysql'), 
-                                    'scalarizr.storage2.volume'),
-            'root_password,repl_password,stat_password,log_file,log_pos,replication_master': 
-                            Ini('%s/%s.ini' % (private_dir, behavior), section),
-            'mysqldump_options': 
-                            Ini('%s/%s.ini' % (public_dir, behavior), section)
+    __node__['scalr'] = Compound({
+        'version': File(private_dir + '/.scalr-version'),
+        'id': Ini(private_dir + '/config.ini', 'general', {'id': 'scalr_id'})
     })
 
-node['redis'] = Compound({
-    'volume,volume_config': Json(
-        '%s/storage/%s.json' % (private_dir, 'redis'), 'scalarizr.storage2.volume'),
-    'replication_master,persistence_type,use_password,master_password': RedisIni(
-                    '%s/%s.ini' % (private_dir, 'redis'), 'redis')
-})
+    class BaseSettings(dict):
+        def __init__(self, *args, **kwds):
+            super(BaseSettings, self).__init__(*args, **kwds)
+            self.sanitize()
+
+        def update(self, *args, **kwds):
+            super(BaseSettings, self).update(*args, **kwds)
+            self.sanitize()
+
+        def sanitize(self):
+            self['keep_scripting_logs_time'] = int(self.get('keep_scripting_logs_time', 86400))
+            self['abort_init_on_script_fail'] = int(self.get('abort_init_on_script_fail', False))
+            self['union_script_executor'] = int(self.get('union_script_executor', False))
+            self['api_port'] = int(self.get('api_port', 8010))
+            self['messaging_port'] = int(self.get('messaging_port', 8013))
 
 
-node['rabbitmq'] = Compound({
+    __node__['base'] = BaseSettings()
+    __node__['base'].sanitize()
+    __node__['access_data'] = {}
+
+    for behavior in ('mysql', 'mysql2', 'percona', 'mariadb'):
+        section = 'mysql2' if behavior in ('percona', 'mariadb') else behavior
+        __node__[behavior] = Compound({
+            'volume,volume_config': Json('%s/storage/%s.json' % (private_dir, 'mysql'),
+                'scalarizr.storage2.volume'),
+            'root_password,repl_password,stat_password,log_file,log_pos,replication_master':
+                Ini('%s/%s.ini' % (private_dir, behavior), section),
+            'mysqldump_options': Ini('%s/%s.ini' % (public_dir, behavior), section)
+        })
+
+    __node__['redis'] = Compound({
+        'volume,volume_config': Json(
+            '%s/storage/%s.json' % (private_dir, 'redis'), 'scalarizr.storage2.volume'),
+        'replication_master,persistence_type,use_password,master_password': RedisIni(
+                        '%s/%s.ini' % (private_dir, 'redis'), 'redis')
+    })
+
+    __node__['rabbitmq'] = Compound({
         'volume,volume_config': Json('%s/storage/%s.json' % (private_dir, 'rabbitmq'),
-                        'scalarizr.storage2.volume'),
-        'password,node_type,cookie,hostname': Ini(
-                                                '%s/%s.ini' % (private_dir, 'rabbitmq'), 'rabbitmq')
+            'scalarizr.storage2.volume'),
+        'password,node_type,cookie,hostname':
+            Ini('%s/%s.ini' % (private_dir, 'rabbitmq'), 'rabbitmq')
+    })
 
-})
+    __node__['postgresql'] = Compound({
+        'volume,volume_config': Json('%s/storage/%s.json' % (private_dir, 'postgresql'),
+            'scalarizr.storage2.volume'),
+        'replication_master,pg_version,scalr_password,root_password, root_user': Ini(
+            '%s/%s.ini' % (private_dir, 'postgresql'), 'postgresql')
+    })
 
-node['postgresql'] = Compound({
-'volume,volume_config': Json('%s/storage/%s.json' % (private_dir, 'postgresql'),
-        'scalarizr.storage2.volume'),
-'replication_master,pg_version,scalr_password,root_password, root_user': Ini(
-        '%s/%s.ini' % (private_dir, 'postgresql'), 'postgresql')
-})
-
-node['mongodb'] = Compound({
-        'volume,volume_config':
-                                Json('%s/storage/%s.json' % (private_dir, 'mongodb'), 'scalarizr.storage2.volume'),
-        'snapshot,shanpshot_config':
-                                Json('%s/storage/%s-snap.json' % (private_dir, 'mongodb'),'scalarizr.storage2.snapshot'),
+    __node__['mongodb'] = Compound({
+        'volume,volume_config': Json('%s/storage/%s.json' % (private_dir, 'mongodb'),
+            'scalarizr.storage2.volume'),
+        'snapshot,shanpshot_config': Json('%s/storage/%s-snap.json' % (private_dir, 'mongodb'),
+            'scalarizr.storage2.snapshot'),
         'shards_total,password,replica_set_index,shard_index,keyfile':
-                                Ini('%s/%s.ini' % (private_dir, 'mongodb'), 'mongodb')
-})
+            Ini('%s/%s.ini' % (private_dir, 'mongodb'), 'mongodb')
+    })
 
-node['nginx'] = Compound({
-    'app_port,upstream_app_role':
-        Ini('%s/%s.ini' % (public_dir, 'www'), 'www')
-})
+    __node__['nginx'] = Compound({
+        'app_port,upstream_app_role': Ini('%s/%s.ini' % (public_dir, 'www'), 'www')
+    })
 
-node['apache'] = Compound({
-    'vhosts_path,apache_conf_path':
-        Ini('%s/%s.ini' % (public_dir, 'app'), 'app')
-})
+    __node__['apache'] = Compound({
+        'vhosts_path,apache_conf_path': Ini('%s/%s.ini' % (public_dir, 'app'), 'app')
+    })
 
+    __node__['tomcat'] = {}
 
-node['tomcat'] = {}
-
-
-node['ec2'] = Compound({
+    __node__['ec2'] = Compound({
         't1micro_detached_ebs': State('ec2.t1micro_detached_ebs'),
         'hostname_as_pubdns': Ini('%s/%s.ini' % (public_dir, 'ec2'), 'ec2'),
         'ami_id': Call('scalarizr.bus', 'bus.platform.get_ami_id'),
@@ -439,38 +497,41 @@ node['ec2'] = Compound({
         'region': Call('scalarizr.bus', 'bus.platform.get_region'),
         'connect_ec2': Attr('scalarizr.bus', 'bus.platform.get_ec2_conn'),
         'connect_s3': Attr('scalarizr.bus', 'bus.platform.get_s3_conn')
-})
-node['cloudstack'] = Compound({
+    })
+    __node__['cloudstack'] = Compound({
         'connect_cloudstack': Attr('scalarizr.bus', 'bus.platform.get_cloudstack_conn'),
         'instance_id': Call('scalarizr.bus', 'bus.platform.get_instance_id'),
         'zone_id': Call('scalarizr.bus', 'bus.platform.get_avail_zone_id'),
         'zone_name': Call('scalarizr.bus', 'bus.platform.get_avail_zone')
-})
-node['openstack'] = Compound({
+    })
+    __node__['openstack'] = Compound({
         'connect_nova': Attr('scalarizr.bus', 'bus.platform.get_nova_conn'),
         'connect_cinder': Attr('scalarizr.bus', 'bus.platform.get_cinder_conn'),
         'connect_swift': Attr('scalarizr.bus', 'bus.platform.get_swift_conn'),
         'server_id': Call('scalarizr.bus', 'bus.platform.get_server_id')
-})
+    })
 
-node['gce'] = Compound({
+    __node__['gce'] = Compound({
         'connect_compute': Attr('scalarizr.bus', 'bus.platform.get_compute_conn'),
         'connect_storage': Attr('scalarizr.bus', 'bus.platform.get_storage_conn'),
         'project_id': Call('scalarizr.bus', 'bus.platform.get_project_id'),
         'instance_id': Call('scalarizr.bus', 'bus.platform.get_instance_id'),
         'zone': Call('scalarizr.bus', 'bus.platform.get_zone')
-})
+    })
 
-node['scalr'] = Compound({
+    __node__['scalr'] = Compound({
         'version': File(private_dir + '/.scalr-version'),
         'id': Ini(private_dir + '/config.ini', 'general', {'id': 'scalr_id'})
-})
+    })
 
-node['messaging'] = Compound({
-    'send': Attr('scalarizr.bus', 'bus.messaging_service.send')
-})
+    __node__['messaging'] = Compound({
+        'send': Attr('scalarizr.bus', 'bus.messaging_service.send')
+    })
 
-node['access_data'] = {}
+    __node__['access_data'] = {}
+    __node__['bollard'] = None
+    __node__['events'] = Attr('scalarizr.bus', 'bus')
+    __node__['queryenv'] = Attr('scalarizr.bus', 'bus.queryenv_service')
 
-__node__ = Compound(node)
 
+reload_params(default=True)

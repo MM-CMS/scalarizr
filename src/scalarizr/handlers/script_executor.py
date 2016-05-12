@@ -10,6 +10,7 @@ import json
 import random
 import ConfigParser
 import subprocess
+import traceback
 import threading
 import os
 import shutil
@@ -20,16 +21,16 @@ import Queue
 import binascii
 from urlparse import urlparse
 from urllib2 import urlopen
-from urllib2 import HTTPError
 try:
     import httplib2
     with_httplib2 = True
 except ImportError:
     with_httplib2 = False
+import psutil
 
 from scalarizr import config as szrconfig
 from scalarizr import linux
-import scalarizr.linux.execute
+from scalarizr.linux import coreutils
 from scalarizr.bus import bus
 from scalarizr.handlers import Handler, HandlerError
 from scalarizr.handlers.chef import ChefSolo, ChefClient, extract_json_attributes
@@ -43,18 +44,6 @@ def get_handlers():
     return [ScriptExecutor()]
 
 
-def get_truncated_log(logfile, maxsize=None):
-    maxsize = maxsize or logs_truncate_over
-    f = open(logfile, "r")
-    try:
-        ret = unicode(f.read(int(maxsize)), 'utf-8', errors='ignore')
-        if (os.path.getsize(logfile) > maxsize):
-            ret += u"... Truncated. See the full log in " + logfile.encode('utf-8')
-        return ret.encode('utf-8')
-    finally:
-        f.close()
-
-
 LOG = logging.getLogger(__name__)
 
 
@@ -64,12 +53,37 @@ skip_events = set()
 logs_truncate_over = 20000
 
 
+def get_truncated_log(logfile, maxsize=None):
+    """
+    @param logfile: log file path
+    @param maxsize: size in bytes to return
+    @return: last {maxsize} bytes of logfile
+    """
+    maxsize = maxsize or logs_truncate_over
+
+    with open(logfile, "r") as f:
+        f.seek(0, 2)
+        filesize = f.tell()
+        f.seek(0)
+        offset = filesize - maxsize if maxsize < filesize else 0
+
+        message = u''
+        if offset:
+            f.seek(offset)
+            message = u"Log file truncated. See the full log in {} ...\n".format(
+                logfile.encode('utf-8'))
+
+        output = message + unicode(f.read(), 'utf-8', errors='ignore')
+
+        return output.encode('utf-8')
+
+
 if linux.os.windows_family:
     exec_dir_prefix = os.getenv('TEMP') + r'\scalr-scripting'
-    logs_dir = os.getenv('PROGRAMFILES') + r'\Scalarizr\var\log\scripting'
+    logs_dir = os.path.join(__node__['log_dir'], 'scripting')
 else:
     exec_dir_prefix = '/usr/local/bin/scalr-scripting.'
-    logs_dir = '/var/log/scalarizr/scripting'
+    logs_dir = os.path.join(__node__['log_dir'], 'scalarizr', 'scripting')
 
 
 class ScriptExecutor(Handler):
@@ -163,8 +177,12 @@ class ScriptExecutor(Handler):
             scripts.append(script_class(**kwds))
         LOG.debug('Restoring %d in-progress scripts', len(scripts))
 
-        for sc in scripts:
-            self._execute_one_script(sc)
+        def supervisor():        
+            for sc in scripts:
+                self._execute_one_script(sc)
+        t = threading.Thread(target=supervisor)
+        t.setDaemon(True)
+        t.start()
 
         if __node__['state'] == 'running':
             params = self._queryenv.list_farm_role_params(__node__['farm_role_id']).get('params', {})
@@ -173,8 +191,9 @@ class ScriptExecutor(Handler):
 
     def on_shutdown(self):
         # save state
-        LOG.debug('Saving Work In Progress (%d items)', len(self.in_progress))
-        szrconfig.STATE['script_executor.in_progress'] = [sc.state() for sc in self.in_progress]
+        if self.in_progress:
+            LOG.debug('Saving Work In Progress (%d items)', len(self.in_progress))
+            szrconfig.STATE['script_executor.in_progress'] = [sc.state() for sc in self.in_progress]
 
     def on_host_init_response(self, hir_message):
         self._data = hir_message.body.get('base', {})
@@ -203,32 +222,30 @@ class ScriptExecutor(Handler):
                 script.start()
             script.wait()
 
+        except KeyboardInterrupt:
+            raise
         except:
             exc_info = sys.exc_info()
-            if script.asynchronous:
-                msg = 'Asynchronous script {0!r} error: {1}'.format(
-                        script.name, str(exc_info[1]))
-                LOG.warn(msg, exc_info=exc_info)
-            raise
         finally:
-            script_result = script.get_result()
-            if exc_info:
-                with open(script.stderr_path, 'w+') as stderr_log:
-                    stderr_log.write(str(exc_info[1]))
-                script_result['stderr'] = binascii.b2a_base64(str(exc_info[1]))
-                script_result['return_code'] = 1
-            LOG.debug('sending exec script result message')
-            self.send_message(Messages.EXEC_SCRIPT_RESULT, script_result, queue=Queues.LOG)
-            self.in_progress.remove(script)
-            if not exc_info \
-                    and script_result['return_code'] != 0 \
-                    and script.event_name == 'BeforeHostUp' \
-                    and int(__node__['base'].get('abort_init_on_script_fail', False)):
-                msg = ('Script {0} exited with code {1}, '
-                        'and the option to abort initialization when a Blocking BeforeHostUp Script fails was enabled. '
-                        'Update the script, or disable the option in the Advanced Tab.').format(
-                        script.name, script_result['return_code'])
-                raise HandlerError(msg)
+            if __node__['running']:
+                script_result = script.get_result()
+                if exc_info:
+                    with open(script.stderr_path, 'w+') as stderr_log:
+                        stderr_log.write(str(exc_info[1]))
+                    script_result['stderr'] = binascii.b2a_base64(str(exc_info[1]))
+                    script_result['return_code'] = 1
+                LOG.debug('sending exec script result message')
+                self.send_message(Messages.EXEC_SCRIPT_RESULT, script_result, queue=Queues.LOG)
+                self.in_progress.remove(script)
+                if not exc_info \
+                        and script_result['return_code'] != 0 \
+                        and script.event_name == 'BeforeHostUp' \
+                        and int(__node__['base'].get('abort_init_on_script_fail', False)):
+                    msg = ('Script {0} exited with code {1}, '
+                            'and the option to abort initialization when a Blocking BeforeHostUp Script fails was enabled. '
+                            'Update the script, or disable the option in the Advanced Tab.').format(
+                            script.name, script_result['return_code'])
+                    raise HandlerError(msg)
 
 
     def execute_scripts(self, scripts, event_name, scripts_qty):
@@ -265,6 +282,8 @@ class ScriptExecutor(Handler):
 
     def __call__(self, message):
         event_name = message.event_name if message.name == Messages.EXEC_SCRIPT else message.name
+        if message.name == Messages.REBOOT_FINISH:
+            event_name = 'RebootComplete'
         role_name = message.body.get('role_name', 'unknown_role')
         LOG.debug("Scalr notified me that '%s' fired", event_name)
 
@@ -283,10 +302,8 @@ class ScriptExecutor(Handler):
 
                 environ = os.environ.copy()
 
-                global_variables = message.body.get('global_variables') or []
-                global_variables = dict((kv['name'], kv['value'].encode('utf-8') if kv['value'] else '') for kv in global_variables)
-                if linux.os.windows_family:
-                    global_variables = dict((k.encode('ascii'), v.encode('ascii')) for k, v in global_variables.items())
+                gvs = message.body.get('global_variables') or []
+                global_variables = {kv['name'].encode('utf-8'):kv.get('value','').encode('utf-8') for kv in gvs if 'name' in kv}
                 environ.update(global_variables)
 
                 LOG.debug('Fetching scripts from incoming message')
@@ -299,7 +316,9 @@ class ScriptExecutor(Handler):
                     if 'chef' in kwds:
                         if 'asynchronous' in kwds:
                             assert not int(kwds['asynchronous']), 'Chef script could only be executed in synchronous mode'
-                        script_class = ChefSoloScript if 'cookbook_url' in kwds['chef'] else ChefClientScript
+                        script_class = ChefSoloScript \
+                            if 'cookbook_url' in kwds['chef'] \
+                            else ChefClientScript
                     else:
                         script_class = Script
 
@@ -326,8 +345,7 @@ class ScriptExecutor(Handler):
                                 'execution_id': kwds['execution_id'],
                                 'script_name': kwds.get('name'),
                                 'script_path': kwds.get('path'),
-                                'run_as': kwds.get('run_as')
-                            }
+                                'run_as': kwds.get('run_as')}
                         if script_class is ChefSoloScript:
                             message_body.update({'cookbook_url': kwds.get('cookbook_url')})
                         else:
@@ -343,6 +361,8 @@ class ScriptExecutor(Handler):
 
             LOG.debug('Fetched %d scripts', scripts_qty)
             self.execute_scripts(scripts, event_name, scripts_qty)
+        except KeyboardInterrupt:
+            raise
         except:
             if event_name == 'BeforeHostUp' \
                     and int(__node__['base'].get('abort_init_on_script_fail', False)):
@@ -427,8 +447,8 @@ class Script(object):
 
     def check_runability(self):
         path_params = urlparse(self.path or '')
-        if path_params.scheme != '':
-            if path_params.scheme == 'https':
+        if path_params.scheme in ('http', 'https'):
+            if path_params.scheme == 'https' and with_httplib2:
                 # we are using httplib2 for opening https url because it
                 # makes ssl certificate validation and urlopen doesn't
                 h = httplib2.Http()
@@ -446,11 +466,13 @@ class Script(object):
             self.path = None
             self.exec_path = self._generate_exec_path()
 
-        if self.body or self.path:
+        if self.body or (self.path and not coreutils.is_binary(self.path)):
             self.interpreter = read_shebang(path=self.path, script=self.body)
             if linux.os['family'] == 'Windows' and self.body:
                 # Erase first line with #!
                 self.body = '\n'.join(self.body.splitlines()[1:])
+        elif self.path:
+            self.interpreter = self.path
 
         if self.interpreter == 'powershell' \
                 and os.path.splitext(self.exec_path)[1] not in ('.ps1', '.psm1'):
@@ -510,7 +532,10 @@ class Script(object):
         else:
             command = []
             if self.run_as and self.run_as != 'root':
-                command = ['sudo', '-u', self.run_as]
+                command = ['sudo', 
+                    '-E', # preserve environment
+                    '-H', # set HOME to the home directory of target user
+                    '-u', self.run_as]
             command += [self.exec_path]
 
         # Start process
@@ -533,9 +558,11 @@ class Script(object):
             # Communicate with process
             self.logger.debug('Communicating with %s (pid: %s)', self.interpreter, self.pid)
             while time.time() - self.start_time < self.exec_timeout:
-                time.sleep(5)
                 if self._proc_poll() is None:
-                    time.sleep(0.5)
+                    if __node__['running']:
+                        time.sleep(0.5)
+                    else:
+                        raise KeyboardInterrupt()
                 else:
                     # Process terminated
                     self.logger.debug('Process terminated')
@@ -563,6 +590,8 @@ class Script(object):
                             self.return_code,
                             self.elapsed_time)
 
+        except KeyboardInterrupt:
+            raise
         except:
             if threading.currentThread().name != 'MainThread':
                 self.logger.exception('Exception in script execution routine')
@@ -570,7 +599,8 @@ class Script(object):
                 raise
 
         finally:
-            if not self.path:
+            # Remove finished scripts passed as code
+            if not self.path and __node__['running']:
                 f = os.path.dirname(self.exec_path)
                 if os.path.exists(f):
                     shutil.rmtree(f)
@@ -612,14 +642,17 @@ class Script(object):
         if self.proc:
             return self.proc.poll()
         else:
-            statfile = '/proc/%s/stat' % self.pid
-            exefile = '/proc/%s/exe' % self.pid
-            if os.path.exists(exefile) and os.readlink(exefile) == self.interpreter:
-                stat = open(statfile).read().strip().split(' ')
-                if stat[2] not in ('Z', 'D'):
+            try:
+                proc = psutil.Process(self.pid)
+            except psutil.NoSuchProcess:
+                return 0
+            else:
+                # occurence of a powershell / cmd in exe on Windows
+                # exact match of exe and interpreter on Linux
+                if (linux.os.windows and self.interpreter in proc.exe()) or \
+                    (not linux.os.windows and self.interpreter == proc.exe()):
                     return None
-
-            return 0
+                return 0
 
     def _proc_kill(self):
         self.logger.warn('Script %s reached timeout %d seconds, sending TERM signal (pid: %s)',
@@ -694,17 +727,23 @@ class ChefClientScript(BaseChefScript):
 
     def __init__(self, **kwds):
         self.name = kwds.get("name") or "chef-client-script.%s.%s" % (kwds.get('event_name', ''), time.time())
-        self.chef_params = kwds.pop('chef')
+        chef_params = self.chef_params = kwds.pop('chef')
         self.with_json_attributes = extract_json_attributes(self.chef_params)
 
-        self.chef = ChefClient(self.chef_params.get('server_url'),
-                               self.with_json_attributes,
-                               self.chef_params.get('node_name'),
-                               self.chef_params.get('validator_name'),
-                               self.chef_params.get('validator_key'),
-                               self.chef_params.get('environment'),
-                               kwds.get("environ"),
-                               override_runlist=bool(self.with_json_attributes))
+        first_bootstrap = chef_params.get('first_bootstrap')
+
+        self.chef = ChefClient(
+            self.chef_params.get('server_url'),
+            self.with_json_attributes, 
+            chef_params.get('node_name'),
+            chef_params.get('validator_name'), 
+            chef_params.get('validator_key'),
+            chef_params.get('environment'), 
+            kwds.get("environ"), 
+            chef_params.get('log_level', 'auto'),
+            override_runlist=bool(self.with_json_attributes) and not first_bootstrap,
+            ssl_verify_mode=self.chef_params.get("ssl_verify_mode", "verify_none"),
+            client_rb_template=self.chef_params.get('client_rb_template'))
 
         self.body = self._get_body()
         super(ChefClientScript, self).__init__(**kwds)
@@ -730,15 +769,17 @@ class ChefSoloScript(BaseChefScript):
         self.name = kwds.get("name") or "chef-solo-script.%s.%s" % (kwds.get('event_name', ''), time.time())
         self.chef_params = kwds.pop("chef")
         self.with_json_attributes = extract_json_attributes(self.chef_params)
-
-        self.chef = ChefSolo(self.chef_params.get("cookbook_url"),
-                             self.chef_params.get("cookbook_url_type"),
-                             self.with_json_attributes,
-                             self.chef_params.get("relative_path"),
-                             kwds.get("environ"),
-                             self.chef_params.get("ssh_private_key"),
-                             run_as=kwds.get("run_as"),
-                             temp_dir=kwds.get("temp_dir"))
+        self.chef = ChefSolo(
+            self.chef_params.get("cookbook_url_type"), 
+            self.chef_params.get("cookbook_url"),
+            self.with_json_attributes,
+            self.chef_params.get("relative_path"),
+            kwds.get("environ"),
+            self.chef_params.get("ssh_private_key"),
+            run_as=kwds.get("run_as"),
+            log_level=self.chef_params.get('log_level', 'auto'),
+            temp_dir=kwds.get("temp_dir"),
+            solo_rb_template=self.chef_params.get('solo_rb_template'))
 
         self.chef_temp_dir = self.chef.temp_dir
         self.body = self._get_body()

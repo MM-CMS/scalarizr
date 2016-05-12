@@ -39,7 +39,7 @@ class OpenstackRebundleWindowsHandler(handlers.Handler):
 
             result = dict(
                 status = "ok",
-                bundle_task_id = message.bundle_task_id              
+                bundle_task_id = message.bundle_task_id
             )
             result.update(software.system_info())
             self.send_message(Messages.WIN_PREPARE_BUNDLE_RESULT, result)
@@ -68,10 +68,12 @@ class OpenstackRebundleLinuxHandler(rebundle_hdlr.RebundleHandler):
         LOG.info('Server image %s created', image_id)
 
         result = [None]
-        def image_completed():
+        def image_finished():
             try:
                 result[0] = nova.images.get(image_id)
-                return result[0].status in ('ACTIVE', 'FAILED', 'DELETED')
+                status = result[0].status
+                LOG.debug('Image status: %s', status)
+                return status and status.lower() not in ('queued', 'saving')
             except:
                 e = sys.exc_info()[1]
                 if 'Unhandled exception occurred during processing' in str(e):
@@ -88,7 +90,8 @@ class OpenstackRebundleLinuxHandler(rebundle_hdlr.RebundleHandler):
                 LOG.warn('Cleanup failed: %s', exc_info=sys.exc_info())
 
         try:
-            wait_until(image_completed, start_text='Polling image status', sleep=30)
+            # 2h timeout
+            wait_until(image_finished, start_text='Polling image status', sleep=30, timeout=7200)
             image = result[0]
             if image.status != 'ACTIVE':
                 raise handlers.HandlerError('Image %s becomes %s', image.id, image.status)

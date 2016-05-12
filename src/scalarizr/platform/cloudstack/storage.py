@@ -1,4 +1,3 @@
-from __future__ import with_statement
 '''
 Created on Sep 12, 2011
 
@@ -117,15 +116,15 @@ class CSVolumeProvider(VolumeProvider):
                         attached = True
                     else:
                         LOG.warning('Volume %s is not available. '
-                                                                'It is attached to different instance %s. '
-                                                                'Now scalarizr will detach it',
-                                                                volume_id, native_vol.virtualmachineid)
+                            'It is attached to different instance %s. '
+                            'Now scalarizr will detach it',
+                            volume_id, native_vol.virtualmachineid)
                         if native_vol.vmstate == 'Stopping':
                             # We should wait for state chage
                             def vm_state_changed():
-                                native_vol = conn.listVolumes(id=volume_id or native_vol.id)[0]
-                                return voltool.volume_detached(native_vol) or \
-                                                native_vol.vmstate != 'Stopping'
+                                nv = conn.listVolumes(id=volume_id or native_vol.id)[0]
+                                return voltool.volume_detached(nv) or \
+                                                nv.vmstate != 'Stopping'
                             wait_until(vm_state_changed)
 
                         if voltool.volume_attached(native_vol):
@@ -135,11 +134,15 @@ class CSVolumeProvider(VolumeProvider):
 
                 if not attached:
                     LOG.debug('Attaching volume %s to this instance', volume_id)
-                    device = voltool.attach_volume(conn, native_vol, pl.get_instance_id(), device_id,
-                            to_me=True, logger=LOG)[1]
+                    device = voltool.attach_volume(conn,
+                        native_vol,
+                        pl.get_instance_id(),
+                        device_id,
+                        to_me=True,
+                        logger=LOG)[1]
 
             except:
-                exc_type, exc_value, exc_trace = sys.exc_info()
+                _, exc_value, exc_trace = sys.exc_info()
                 if native_vol:
                     LOG.debug('Detaching volume')
                     try:

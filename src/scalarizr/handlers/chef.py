@@ -5,7 +5,9 @@ Created on Oct 24, 2011
 '''
 
 import os
+import re
 import sys
+import uuid
 import time
 import json
 import signal
@@ -13,6 +15,7 @@ import shutil
 import logging
 import tempfile
 import subprocess
+import binascii
 
 from scalarizr import linux
 from scalarizr.api import chef as chef_api
@@ -29,10 +32,8 @@ if linux.os.windows_family:
 
 
 def get_handlers():
-    if linux.os.windows_family or chef_api.ChefAPI.software_supported:
-        return [ChefHandler()]
-    else:
-        return []
+    return [ChefHandler()]
+
 
 WIN_SERVICE_NAME = 'chef-client'
 LOG = logging.getLogger(__name__)
@@ -43,12 +44,16 @@ chef_server_url  '%(server_url)s'
 environment      '%(environment)s'
 validation_client_name '%(validator_name)s'
 node_name        '%(node_name)s'
+%(ssl_verify_mode)s
 '''
 
 SOLO_CONF_TPL = '''
-cookbook_path "{0}"
-file_cache_path "{1}"
-log_level :{2}
+cookbook_path "%(cookbook_path)s"
+role_path "%(role_path)s"
+data_bag_path "%(data_bag_path)s"
+environment_path "%(environment_path)s"
+file_cache_path "%(file_cache_path)s"
+log_level :%(log_level)s
 '''
 
 if linux.os.windows_family:
@@ -60,7 +65,7 @@ if linux.os.windows_family:
     CHEF_SOLO_BIN = r'C:\opscode\chef\bin\chef-solo.bat'
 else:
     CLIENT_CONF_PATH = '/etc/chef/client.rb'
-    VALIDATOR_KEY_PATH =  '/etc/chef/validation.pem'
+    VALIDATOR_KEY_PATH = '/etc/chef/validation.pem'
     CLIENT_KEY_PATH = '/etc/chef/client.pem'
     JSON_ATTRIBUTES_PATH = '/etc/chef/json_attributes.json'
     CHEF_CLIENT_BIN = which('chef-client')
@@ -156,6 +161,7 @@ class ChefHandler(Handler):
         super(ChefHandler, self).__init__()
         bus.on(init=self.on_init)
         self._chef_data = None
+        self._hir_data = None
         self._run_list = None
 
         self._with_json_attributes = None
@@ -181,14 +187,17 @@ class ChefHandler(Handler):
                     self.daemonize()
 
     def on_host_init_response(self, message):
-        global_variables = message.body.get('global_variables') or []
-        for kv in global_variables:
-            self._global_variables[kv['name']] = kv['value'].encode('utf-8') if kv['value'] else ''
+        self._global_variables = message.body.get('global_variables') or []
+        # global_variables = message.body.get('global_variables') or []
+        # for kv in global_variables:
+        #     self._global_variables[kv['name']] = kv['value'].encode('utf-8') if kv['value'] else ''
 
         if 'chef' in message.body and message.body['chef']:
+            self._hir_data = message.body.copy()
             self._chef_data = message.chef.copy()
             if not self._chef_data.get('node_name'):
                 self._chef_data['node_name'] = self.get_node_name()
+            self._chef_data['first_bootstrap'] = True
 
             self._with_json_attributes = extract_json_attributes(self._chef_data)
 
@@ -221,53 +230,102 @@ class ChefHandler(Handler):
         if not self._chef_data:
             return
 
+        from scalarizr.api.system import SystemAPI
+        system_api = SystemAPI()
         log = bus.init_op.logger if bus.init_op else LOG
         try:
-            # Create client configuration
-            if self._chef_data.get('server_url'):
-                # Delete client.pem
-                if os.path.exists(CLIENT_KEY_PATH):
-                    os.remove(CLIENT_KEY_PATH)
+            event_name = self._chef_data.pop('event_name', 'HostInit')
+            chef_script = {
+                'name': self._chef_data.pop('script_name', '[Scalr built-in] Chef bootstrap'),
+                'execution_id': self._chef_data.pop('execution_id', str(uuid.uuid4())),
+                'exec_timeout': sys.maxint,   
+                'chef': self._chef_data}
 
-                chef_client = ChefClient(chef_server_url=self._chef_data['server_url'],
-                                         json_attributes=self._with_json_attributes,
-                                         node_name=self._chef_data['node_name'],
-                                         validator_name=self._chef_data['validator_name'],
-                                         validation_pem=self._chef_data['validator_key'],
-                                         environment=self._chef_data['environment'],
-                                         environment_variables=self._environ_variables,
-                                         log_level=self._chef_data.get('log_level', 'auto'))
-                try:
-                    chef_client.prepare()
+            prod = bus.messaging_service.get_producer()
+            out_messages = []
+            def append_message(queue, message):
+                out_messages.append(message)
+            prod.on('before_send', append_message)
+            try:
+                # Create client configuration
+                if self._chef_data.get('server_url'):
+                    # Delete client.pem
+                    if os.path.exists(CLIENT_KEY_PATH):
+                        os.remove(CLIENT_KEY_PATH)
+
                     self.send_message('HostUpdate', dict(chef=self._chef_data))
-                    chef_client.run()
-                finally:
-                    chef_client.cleanup()
 
-                daemonize = self._chef_data.get('daemonize')
-                if daemonize and int(daemonize):
-                    log.info('Daemonizing chef-client')
-                    self.daemonize()
+                    system_api.execute_scripts(
+                        [chef_script], 
+                        msg_body={
+                            'event_id': self._hir_data.get('event_id'),
+                            'server_id': self._hir_data.get('server_id'),
+                        },
+                        event_name=event_name, 
+                        global_variables=self._global_variables, 
+                        async=False)
 
-            elif self._chef_data.get('cookbook_url'):
-                solo = ChefSolo(cookbook_url=self._chef_data['cookbook_url'],
-                                cookbook_url_type=self._chef_data['cookbook_url_type'],
-                                json_attributes=self._with_json_attributes,
-                                relative_path=self._chef_data.get('relative_path'),
-                                environment=self._environ_variables,
-                                ssh_private_key=self._chef_data.get('ssh_private_key'),
-                                binary_path=CHEF_SOLO_BIN)
-                try:
-                    solo.prepare()
-                    solo.run()
-                finally:
-                    solo.cleanup()
+                    # chef_client = ChefClient(chef_server_url=self._chef_data['server_url'],
+                    #                          json_attributes=self._with_json_attributes,
+                    #                          node_name=self._chef_data['node_name'],
+                    #                          validator_name=self._chef_data['validator_name'],
+                    #                          validation_pem=self._chef_data['validator_key'],
+                    #                          environment=self._chef_data['environment'],
+                    #                          environment_variables=self._environ_variables,
+                    #                          log_level=self._chef_data.get('log_level', 'auto'))
+                    # try:
+                    #     chef_client.prepare()
+                    #     self.send_message('HostUpdate', dict(chef=self._chef_data))
+                    #     chef_client.run()
+                    # finally:
+                    #     chef_client.cleanup()
 
-            else:
-                raise HandlerError('Neither chef server nor cookbook url were specified')
+                    daemonize = self._chef_data.get('daemonize')
+                    if daemonize and int(daemonize):
+                        log.info('Daemonizing chef-client')
+                        self.daemonize()
+
+                elif self._chef_data.get('cookbook_url'):
+                    system_api.execute_scripts(
+                        [chef_script], 
+                        event_name=event_name, 
+                        global_variables=self._global_variables, 
+                        async=False)
+
+                    # solo = ChefSolo(cookbook_url=self._chef_data['cookbook_url'],
+                    #                 url_type=self._chef_data['url_type'],
+                    #                 json_attributes=self._with_json_attributes,
+                    #                 relative_path=self._chef_data.get('relative_path'),
+                    #                 environment=self._environ_variables,
+                    #                 ssh_private_key=self._chef_data.get('ssh_private_key'),
+                    #                 binary_path=CHEF_SOLO_BIN)
+                    # try:
+                    #     solo.prepare()
+                    #     solo.run()
+                    # finally:
+                    #     solo.cleanup()
+
+                else:
+                    raise HandlerError('Neither chef server nor cookbook url were specified')
+            finally:
+                prod.un('before_send', append_message)
+
+            for msg in out_messages:
+                if msg.name == 'ExecScriptResult':
+                    self._raise_from_exec_script_result(msg)
+
             msg.chef = self._chef_data
         finally:
             self._chef_data = None
+
+
+    def _raise_from_exec_script_result(self, msg):
+        if msg.body.get('return_code') == 0:
+            return
+        raise HandlerError('{} failed: {}'.format(
+            msg.body['script_name'], 
+            binascii.a2b_base64(msg.body['stdout'])))
+
 
     def daemonize(self):
         if linux.os.windows_family:
@@ -295,14 +353,18 @@ class ChefHandler(Handler):
             'SCALR_SERVER_ID': __node__['server_id']
         }
         environ.update(os.environ)
-        environ.update(self._global_variables)
+        gv = {}
+        for kv in self._global_variables:
+            gv[kv['name']] = kv['value'].encode('utf-8') if kv['value'] else ''
+        environ.update(gv)
         if linux.os.windows_family:
             # Windows env should contain only strings, unicode is not an option
             environ = dict((str(x), str(y)) for x, y in environ.items())
         return environ
 
     def get_node_name(self):
-        return __node__['base'].get('hostname') or \
+        hostname = __node__['base'].get('hostname')
+        return hostname and re.sub('\s+', '-', hostname) or \
                 '{0}-{1}-{2}'.format(
                     self._platform.name, 
                     self._platform.get_public_ip(), 
@@ -320,7 +382,9 @@ class ChefClient(object):
                  environment_variables=None,
                  log_level='auto',
                  run_as='root',
-                 override_runlist=False):
+                 override_runlist=False,
+                 ssl_verify_mode='chef_auto',
+                 client_rb_template=None):
 
         self.chef_server_url = chef_server_url
         self.validation_pem = validation_pem
@@ -334,6 +398,8 @@ class ChefClient(object):
         self.environment_variables = environment_variables or dict()
         self.log_level = log_level
         self.run_as = run_as
+        self.ssl_verify_mode = ssl_verify_mode
+        self.client_rb_template = client_rb_template
 
         self.override_runlist = override_runlist
         # Remove runlist from attributes to preserve node's run list
@@ -363,9 +429,18 @@ class ChefClient(object):
             if not os.path.exists(_dir):
                 os.makedirs(_dir)
             with open(CLIENT_CONF_PATH, 'w+') as fp:
+                if self.ssl_verify_mode and self.ssl_verify_mode != 'chef_auto':
+                    ssl_verify_mode = 'ssl_verify_mode :{}'.format(self.ssl_verify_mode)
+                else:
+                    ssl_verify_mode = ''
+                if self.client_rb_template:
+                    LOG.debug('Extending client.rb with user template')
+                    fp.write(self.client_rb_template)
+                    fp.write('\n')
                 fp.write(CLIENT_CONF_TPL % dict(server_url=self.chef_server_url, environment=self.environment,
                                             validator_name=self.validator_name, node_name=self.node_name,
-                                            log_level=self.log_level))
+                                            log_level=self.log_level, ssl_verify_mode=ssl_verify_mode))
+
             os.chmod(CLIENT_CONF_PATH, 0644)
 
             if not os.path.exists(CLIENT_KEY_PATH):
@@ -422,20 +497,21 @@ class ChefSolo(object):
     stacktrace = None
     temp_dir = None
 
-    def __init__(self, cookbook_url, cookbook_url_type, json_attributes,
+    def __init__(self, url_type, url, json_attributes,
                  relative_path=None, environment=None, ssh_private_key=None,
-                 binary_path=None, run_as=None, log_level='auto', temp_dir=None):
+                 binary_path=None, run_as=None, log_level='auto', temp_dir=None,
+                 solo_rb_template=None):
         """
-        @param cookbook_url:
-        @param cookbook_url_type:
+        @param url:
+        @param url_type:
         @param json_attributes: dictionary to pass to -j argument of chef-solo, contains run_list
         @param relative_path:
         @param environment:
         @param ssh_private_key:
         @param binary_path:
         """
-        self.cookbook_url = cookbook_url
-        self.cookbook_url_type = cookbook_url_type
+        self.url = url
+        self.url_type = url_type
         self.relative_path = relative_path
         self.json_attributes = json_attributes
         self.environment = environment or dict()
@@ -447,20 +523,41 @@ class ChefSolo(object):
         self.run_as = run_as or 'root'
         self.log_level = log_level
         self.temp_dir = temp_dir or tempfile.mkdtemp()
+        self.solo_rb_template = solo_rb_template
 
     def prepare(self):
-        if self.cookbook_url_type == 'git':
-            downloader = deploy.GitSource(self.cookbook_url, ssh_private_key=self.ssh_private_key)
+        if self.url_type == 'git':
+            downloader = deploy.GitSource(self.url, ssh_private_key=self.ssh_private_key)
             downloader.update(self.temp_dir)
-        elif self.cookbook_url_type == 'http':
-            downloader = deploy.HttpSource(self.cookbook_url)
+        elif self.url_type == 'http':
+            downloader = deploy.HttpSource(self.url)
             downloader.update(self.temp_dir)
         else:
-            raise HandlerError('Unknown cookbook source type: %s' % self.cookbook_url_type)
-        cookbook_path = os.path.join(self.temp_dir, self.relative_path or '')
+            raise HandlerError('Unknown URL type: %s' % self.url_type)
+
+        dirs = os.listdir(self.temp_dir)
+        if 'cookbooks' in dirs and not self.relative_path:
+            # repository
+            cookbook_path = os.path.join(self.temp_dir, 'cookbooks')
+            role_path = os.path.join(self.temp_dir, 'roles')
+            data_bag_path = os.path.join(self.temp_dir, 'data_bags')
+            environment_path = os.path.join(self.temp_dir, 'environments')
+        else:
+            # cookbooks directory
+            cookbook_path = os.path.join(self.temp_dir, self.relative_path or '')
+            role_path = '/var/chef/roles'
+            data_bag_path = '/var/chef/data_bags'
+            environment_path = '/var/chef/environments'
+        file_cache_path = self.temp_dir
+        log_level = self.log_level
 
         with open(self.chef_solo_cfg_path, 'w') as f:
-            f.write(SOLO_CONF_TPL.format(cookbook_path, self.temp_dir, self.log_level))
+            if self.solo_rb_template:
+                LOG.debug('Exteding solo.rb with user template')
+                f.write(self.solo_rb_template)
+                f.write('\n')
+            f.write(SOLO_CONF_TPL % locals())
+
 
         with open(self.attrs_path, 'w') as f:
             json.dump(self.json_attributes, f)

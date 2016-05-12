@@ -1,4 +1,3 @@
-from __future__ import with_statement
 # Operations with chains:
 # - append
 # - insert
@@ -24,7 +23,7 @@ import logging
 from scalarizr import linux
 from scalarizr.linux import redhat, pkgmgr
 from scalarizr.util import software, system2
-
+from scalarizr.node import __node__
 
 LOG = logging.getLogger(__name__)
 
@@ -452,7 +451,6 @@ def ensure(chain_rules, append=False):
 
 
 def enabled():
-    from scalarizr.node import __node__
     if int(__node__['base'].get('disable_firewall_management', 0)):
         LOG.debug('base.disable_firewall_management: 1, skipping')
         return False

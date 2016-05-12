@@ -41,6 +41,8 @@ class TomcatHandler(handlers.Handler):
             init=self.on_init, 
             start=self.on_start
         )
+
+    def _defer_init(self):
         self.api = tomcat_api.TomcatAPI()
         self.service = self.api.service
 
@@ -50,43 +52,17 @@ class TomcatHandler(handlers.Handler):
             host_init_response=self.on_host_init_response,
             before_host_up=self.on_before_host_up
         )
-        self._insert_iptables_rules()
 
     def on_start(self):
+        self._insert_iptables_rules()
         if __node__['state'] == 'running':
+            self._defer_init()
             self.service.start()
 
 
     def on_host_init_response(self, hir_message):
-        '''
-        if not os.path.exists(self.service.initd_script):
-            tomcat = 'tomcat{0}'.format(self.tomcat_version)
-            pkgs = [tomcat]
-            if linux.os.debian_family:
-                pkgs.append('{0}-admin'.format(tomcat))
-            elif linux.os.redhat_family or linux.os.oracle_family:
-                pkgs.append('{0}-admin-webapps'.format(tomcat))
-            for pkg in pkgs:
-                pkgmgr.installed(pkg)
-        '''
-
+        self._defer_init()
         pkgmgr.installed('augeas-tools' if linux.os.debian_family else 'augeas', updatedb=True)
-
-    '''
-    def _aug_load_tomcat(self, aug):
-        aug.set('/augeas/load/Xml/incl[last()+1]', '{0}/*.xml'.format(__tomcat__['config_dir']))
-        aug.load()
-        file_ = __tomcat__['config_dir'] + '/server.xml'
-        path = '/augeas/files{0}/error'.format(file_)
-        if aug.match(path):
-            msg = 'AugeasError: {0}. file: {1} line: {2} pos: {3}'.format(
-                aug.get(path + '/message'),
-                file_,
-                aug.get(path + '/line'),
-                aug.get(path + '/pos'))
-            raise Exception(msg)
-        aug.defvar('service', '/files{0}/Server/Service'.format(file_))
-    '''
 
 
     def on_before_host_up(self, message):
@@ -156,7 +132,6 @@ class TomcatHandler(handlers.Handler):
                 'save'
             ]
             augtool(augscript)
-
 
         # TODO: Import PEM cert/pk into JKS
         # openssl pkcs12 -export -in cert.pem -inkey key.pem > server.p12

@@ -72,7 +72,6 @@ class NginxHandler(ServiceCtlHandler):
         self._logger = logging.getLogger(__name__)
         self.preset_provider = NginxPresetProvider()
         self.api = NginxAPI()
-        self.api.init_service()
         self._terminating_servers = []
 
         bus.define_events("nginx_upstream_reload")
@@ -139,6 +138,7 @@ class NginxHandler(ServiceCtlHandler):
     def on_start(self):
         self._logger.debug('Handling on_start message')
         if __node__['state'] == 'running':
+            self.api.init_service()
             role_params = self._queryenv.list_farm_role_params(__node__['farm_role_id'])['params']
             nginx_params = role_params.get(BEHAVIOUR)
             v2_mode = (nginx_params and nginx_params.get('proxies')) \
@@ -157,6 +157,7 @@ class NginxHandler(ServiceCtlHandler):
 
     def on_before_host_up(self, message):
         self._logger.debug('Handling on_before_host_up message')
+        self.api.init_service()
         log = bus.init_op.logger
         self._init_script.stop()
 

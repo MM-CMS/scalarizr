@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import time
 import string
 import logging
@@ -16,25 +17,29 @@ from scalarizr.platform import NoCredentialsError
 from scalarizr.node import __node__
 from scalarizr.storage2.volumes import base
 from scalarizr.linux import coreutils
+from scalarizr.util import system2
 
+if linux.os.windows:
+    from scalarizr.storage2.util import wintools
 
 LOG = logging.getLogger(__name__)
 
 
 def name2device(name):
     if not name.startswith('/dev'):
+        if linux.os.windows:
+            return re.sub(r'^sd', 'xvd', name)
         name = os.path.join('/dev', name)
     if name.startswith('/dev/xvd'):
         return name
-    if storage2.RHEL_DEVICE_ORDERING_BUG or os.path.exists('/dev/xvda1'):
-        name = name.replace('/sd', '/xvd')
+    name = name.replace('/sd', '/xvd')
     if storage2.RHEL_DEVICE_ORDERING_BUG:
         name = name[0:8] + chr(ord(name[8])+4) + name[9:]
     return name
 
 
 def device2name(device):
-    if device.startswith('/dev/sd'):
+    if device.startswith('/dev/sd') or re.search(r'/dev/xvd[b-c][a-z]', device):
         return device
     elif storage2.RHEL_DEVICE_ORDERING_BUG:
         device = device[0:8] + chr(ord(device[8])-4) + device[9:]
@@ -42,53 +47,176 @@ def device2name(device):
 
 
 def get_free_name():
-    if linux.os.ubuntu and linux.os['release'] >= (14, 4):
-        # ubuntu 14.04 returns Attachment point /dev/sdf is already in used
-        s = 6
-    elif linux.os['release'] and linux.os.redhat_family:
-        # rhel 6 returns "Null body" when attach to /dev/sdf
-        s = 7
-    else:
-        s = 5
-    available = set(string.ascii_lowercase[s:16])        
+    def norm_name(device):
+        return re.sub(r'/dev/sd(.*)', r'\1', device)
 
     conn = __node__['ec2'].connect_ec2()
-    if not linux.os.windows:
-        # Ubuntu 14.04 failed to attach volumes on device names mentioned in block device mapping, 
-        # even if this instance type doesn't support them and OS has not such devices
-        ephemerals = set(device[-1] for device in __node__['platform'].get_block_device_mapping().values())
-    else:
-        # Windows returns ephemeral[0-25] for all possible devices a-z, and makes ephemeral check senseless
-        ephemerals = set()
-    available = available - ephemerals
+    instance = conn.get_all_instances([__node__['ec2']['instance_id']])[0].instances[0]
 
-    filters = {
-        'attachment.instance-id': __node__['ec2']['instance_id']
-    }
-    attached = set(vol.attach_data.device[-1]
-                for vol in conn.get_all_volumes(filters=filters))
-    dirty_detached = set()
+    # Add /dev/sd[a-z] pattern
+    end = None if linux.os.windows else 16
+    start = 5
+    if linux.os.ubuntu and linux.os['release'] >= (14, 4):
+        # Ubuntu 14.04 returns 'Attachment point /dev/sdf is already in used'
+        start = 6
+    if linux.os.redhat_family:
+        # RHEL 6 returns "Null body" when attaching to /dev/sdf and /dev/sdg
+        start = 7
+    prefix = 'xvd' if linux.os.windows else '/dev/sd'
+    available = list(prefix + a for a in string.ascii_lowercase[start:end])
+
+    # Add /dev/xvd[b-c][a-z] pattern
+    if instance.virtualization_type == 'hvm':
+        prefix = 'xvd' if linux.os.windows else '/dev/xvd'
+        available += list(prefix + b + a
+            for b in 'bc'
+            for a in string.ascii_lowercase)
+
+    # Exclude ephemerals from block device mapping
     if not linux.os.windows:
-        dirty_detached = __node__['ec2']['t1micro_detached_ebs'] or set()
-        dirty_detached = set(name[-1] for name in dirty_detached)
+        # Ubuntu 14.04 fail to attach volumes on device names mentioned in block device mapping,
+        # even if this instance type doesn't support them and OS hasn't such devices
+        ephemerals = list(device \
+            for device in __node__['platform'].get_block_device_mapping().values())
+        available = list(a for a in available if a not in ephemerals)
+
+    # Exclude devices available in OS
+    if not linux.os.windows:
+        available = list(a for a in available if not os.path.exists(name2device(a)))
+
+    # Exclude attached volumes
+    filters = {
+        'attachment.instance-id': instance.id}
+    attached = list(vol.attach_data.device \
+                for vol in conn.get_all_volumes(filters=filters))
+    available = list(a for a in available if a not in attached)
+
+    # Exclude t1.micro detached volumes
+    if instance.instance_type == 't1.micro':
+        dirty_detached = list()
+        if not linux.os.windows:
+            dirty_detached = __node__['ec2']['t1micro_detached_ebs'] or list()
+            dirty_detached = list(name for name in dirty_detached)
+        available = list(a for a in available if a not in dirty_detached)
 
     try:
-        lets = sorted(list(available - attached - dirty_detached))
-        let = lets[0]
+        return available[0]
     except IndexError:
         msg = 'No free letters for block device name remains'
         raise storage2.StorageError(msg)
-    else:
-        name = '/dev/sd' if not linux.os.windows else 'xvd'
-        name = name + let
-        return name
+
+
+class WinMountMixin(object):
+
+    if linux.os.windows:
+
+        win_disk_wait_timeout = 60
+        win_disk_polling_interval = 1
+
+        def _letter_cmd(self, cmd, device, letter):
+            """ Letter assignment/removing for dynamic disks with one simple volume """
+            if letter is None and cmd == 'remove':
+                letter = 'all'
+            elif letter == '' or letter == 'auto':
+                letter = ''
+            else:
+                letter = 'letter={}'.format(letter)
+
+            # if device given is just one letter, then try to select volume by this letter
+            volume = device if len(device) == 1 else self._get_device_letter(device)
+            commands = \
+                """select volume {0}
+                   {1} {2}
+                   exit
+                """.format(volume, cmd, letter)
+            return system2(('diskpart',), stdin=commands)[0]
+
+        def _assign_letter(self, device, letter):
+            LOG.debug('Trying to move device which taken given letter')
+            out = self._letter_cmd('assign', letter, 'auto')
+
+            LOG.debug('Assigning letter {} to device: {}'.format(letter, device))
+            out = self._letter_cmd('assign', device, letter)
+
+            if 'specified drive letter is not free to be assigned' in out:
+                raise storage2.StorageError(
+                    'Letter {} is taken and can\'t be released'.format(letter))
+            return out
+
+        def _remove_letter(self, device, letter=None):
+            msg_letter = "letter {}".format(letter) if letter else "all letters"
+            LOG.debug('Removing {} from device: {}'.format(msg_letter, device))
+            out = self._letter_cmd('remove', device, letter)
+            if 'error' in out:
+                raise storage2.StorageError(
+                    'Can\'t remove {} from device {}'.format(msg_letter, device))
+
+        def _get_device_letter(self, device):
+            device_id = wintools.get_logical_disk_attribute(device, 'DeviceID')
+            if not device_id:
+                return None
+            return device_id.replace(':', '')
+
+        def _get_fs(self, device):
+            LOG.debug('Searching for fs on {}'.format(device))
+            fs = wintools.get_logical_disk_attribute(device, 'FileSystem')
+            if not fs:
+                LOG.debug('FS is not found on {}'.format(device))
+                return None
+            fs = fs.lower()
+            LOG.debug('Found FS {}'.format(fs))
+            return fs
+
+        def mounted_to(self):
+            return self._get_device_letter(self.device)
+
+        def mount(self):
+            self._check(mpoint=True)
+            mounted_to = self._get_device_letter(self.device)
+            if mounted_to != self.mpoint:
+                if not re.match(r'^[a-zA-Z]$', self.mpoint):
+                    raise storage2.StorageError(
+                        "Mount point must be a single letter. Given: %s" % self.mpoint)
+
+                LOG.debug('Assigning letter %s to %s', self.mpoint, self.id)
+                self._assign_letter(self.device, self.mpoint)
+                base.bus.fire("block_device_mounted", volume=self)
+
+            try:
+                getattr(self, 'label')
+            except AttributeError:
+                pass
+            else:
+                fs = storage2.filesystem(self.fstype)
+                if fs.get_label(self.mpoint) != self.label:
+                    LOG.debug('Setting label "{}" for device id="{}"'.format(self.label, self.id))
+                    fs.set_label(self.mpoint, self.label)
+                elif self.label:
+                    LOG.debug('Label for device id="{}" has already been set, skipping.'
+                        .format(self.device))
+
+        def umount(self):
+            LOG.debug('Umounting {} from {}'.format(self.device, self.mpoint))
+            try:
+                self._check(fstype=False, device=True)
+            except:
+                return
+            self._remove_letter(self.device)
+
+        def is_fs_created(self):
+            self._check()
+            fstype = self._get_fs(self.device)
+            if fstype:
+                self.fstype = fstype
+                return True
+            return False
 
 
 class EbsMixin(object):
 
     _conn = None
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.error_messages.update({
             'no_connection': 'EC2 connection should be available '
                                 'to perform this operation'
@@ -166,27 +294,39 @@ class EbsMixin(object):
         t.start()
 
 
-class EbsVolume(base.Volume, EbsMixin):
+class EbsVolume(WinMountMixin, base.Volume, EbsMixin):
     attach_lock = threading.Lock()
 
     _global_timeout = 3600
 
-    def __init__(self,
-                 name=None,
-                 avail_zone=None,
-                 size=None,
-                 volume_type='standard',
-                 iops=None,
-                 encrypted=False,
-                 **kwds):
-        base.Volume.__init__(self, name=name, avail_zone=avail_zone,
-                        size=size and int(size) or None,
-                        volume_type=volume_type, iops=iops, encrypted=encrypted,
-                        **kwds)
+    def __init__(
+            self,
+            name=None,
+            avail_zone=None,
+            size=None,
+            volume_type='standard',
+            iops=None,
+            encrypted=False,
+            kms_key_id=None,
+            **kwds):
+
+        size = int(size) if size else None
+        base.Volume.__init__(
+            self,
+            name=name,
+            avail_zone=avail_zone,
+            size=size,
+            volume_type=volume_type,
+            iops=iops,
+            encrypted=encrypted,
+            kms_key_id=kms_key_id,
+            **kwds)
         EbsMixin.__init__(self)
+        WinMountMixin.__init__(self)
+
         self.error_messages.update({
-                'no_id_or_conn': 'Volume has no ID and EC2 connection '
-                                                'required for volume construction is not available'
+            'no_id_or_conn': 'Volume has no ID and EC2 connection '
+                'required for volume construction is not available'
         })
         self.features.update({'grow': True})
 
@@ -253,14 +393,6 @@ class EbsVolume(base.Volume, EbsMixin):
             raise storage2.StorageError('Iops parameter must be specified '
                                     'for io1 volumes')
 
-        if target_iops and target_size < 10:
-            raise storage2.StorageError('Volume size is too small to use '
-                                    'provisioned iops')
-
-        if target_iops and (int(target_iops) / target_size) > 10:
-            raise storage2.StorageError('Maximum ratio of 10:1 is permitted'
-                                                            ' between IOPS and volume size')
-
         if size and int(size) < self.size:
             raise storage2.StorageError('New size is smaller than old.')
 
@@ -323,7 +455,8 @@ class EbsVolume(base.Volume, EbsMixin):
                                 volume_type=self.volume_type,
                                 iops=self.iops,
                                 tags=self.tags,
-                                encrypted=self.encrypted)
+                                encrypted=self.encrypted,
+                                kms_key_id=self.kms_key_id)
                 size = ebs.size
                 encrypted = ebs.encrypted
 
@@ -348,7 +481,6 @@ class EbsVolume(base.Volume, EbsMixin):
                     'snap': None,
                     'encrypted': encrypted
             })
-
 
     def _snapshot(self, description, tags, **kwds):
         '''
@@ -381,14 +513,15 @@ class EbsVolume(base.Volume, EbsMixin):
 
 
     def _create_volume(self, zone=None, size=None, snapshot=None,
-                       volume_type=None, iops=None, tags=None, encrypted=False):
+                       volume_type=None, iops=None, tags=None,
+                       encrypted=False, kms_key_id=None):
         LOG.debug('Creating EBS volume (zone: %s size: %s snapshot: %s '
-                  'volume_type: %s iops: %s encrypted: %s)', zone, size, snapshot,
-                        volume_type, iops, encrypted)
+                  'volume_type: %s iops: %s encrypted: %s kms_key_id: %s)',
+                    zone, size, snapshot, volume_type, iops, encrypted, kms_key_id)
         if snapshot:
             self._wait_snapshot(snapshot)
         ebs = self._conn.create_volume(size, zone, snapshot, volume_type, iops,
-                                       encrypted)
+                                       encrypted, kms_key_id)
         LOG.debug('EBS volume %s created', ebs.id)
 
         LOG.debug('Checking that EBS volume %s is available', ebs.id)
@@ -409,14 +542,15 @@ class EbsVolume(base.Volume, EbsMixin):
 
     def _create_snapshot(self, volume, description=None, tags=None, nowait=False):
         LOG.debug('Creating snapshot of EBS volume %s', volume)
-        if not linux.os.windows:
+
+        if not linux.os.windows and self.mounted_to():
             coreutils.sync()
 
-        # conn.create_snapshot leaks snapshots when RequestLimitExceeded occured 
+        # conn.create_snapshot leaks snapshots when RequestLimitExceeded occured
         params = {'VolumeId': volume}
         if description:
             params['Description'] = description[0:255]
-        snapshot = self._conn.get_object('CreateSnapshot', params, 
+        snapshot = self._conn.get_object('CreateSnapshot', params,
                     boto.ec2.snapshot.Snapshot, verb='POST')
 
         try:
@@ -465,6 +599,19 @@ class EbsVolume(base.Volume, EbsMixin):
                     raise Exception(msg)
                 return devices[0], device_name
             else:
+                def check_available():
+                    try:
+                        wintools.aws_bring_disk_online(device_name)
+                        return True
+                    except storage2.StorageError:
+                        return False
+                util.wait_until(
+                    check_available,
+                    start_text='Checking that volume %s is available in OS' % volume_id,
+                    timeout=self.win_disk_wait_timeout,
+                    sleep=self.win_disk_polling_interval,
+                    error_text='No Win32_LogicalDisk available for device {}, '
+                        'although it is online'.format(device_name))
                 return device_name, device_name
 
 

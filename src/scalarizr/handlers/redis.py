@@ -13,21 +13,17 @@ import time
 import logging
 
 from scalarizr import handlers
-from scalarizr.api import service as preset_service
 from scalarizr.api import redis as redis_api
 
 from scalarizr import config, storage2
 from scalarizr.node import __node__
-from scalarizr.storage2.cloudfs import LargeTransfer
 from scalarizr.bus import bus
 from scalarizr.messaging import Messages
 from scalarizr.util import system2, cryptotool, software, initdv2
 from scalarizr.linux import iptables, which
 from scalarizr.services import redis, backup
 from scalarizr.service import CnfController
-from scalarizr.config import BuiltinBehaviours, ScalarizrState
 from scalarizr.handlers import ServiceCtlHandler, HandlerError, DbMsrMessages
-from scalarizr.handlers import build_tags
 from scalarizr import node
 
 
@@ -76,12 +72,6 @@ class RedisHandler(ServiceCtlHandler, handlers.FarmSecurityMixin):
     @property
     def is_replication_master(self):
         return __redis__["replication_master"]
-
-
-    @property
-    def redis_tags(self):
-        purpose = '%s-' % BEHAVIOUR + ('master' if self.is_replication_master else 'slave')
-        return build_tags(purpose, 'active')
 
 
     @property
@@ -338,7 +328,6 @@ class RedisHandler(ServiceCtlHandler, handlers.FarmSecurityMixin):
         # Update configs
         __redis__.update(redis_data)
         __redis__['volume'].mpoint = __redis__['storage_dir']
-        __redis__['volume'].tags = self.redis_tags
         if self.default_service.running:
             self.default_service.stop('Terminating default redis instance')
 
@@ -365,7 +354,6 @@ class RedisHandler(ServiceCtlHandler, handlers.FarmSecurityMixin):
         else:
             self._init_slave(message)
 
-        __redis__['volume'].tags = self.redis_tags
         __redis__['volume'] = storage2.volume(__redis__['volume'])
 
         self._init_script = self.redis_instances.get_default_process()
@@ -615,9 +603,7 @@ class RedisHandler(ServiceCtlHandler, handlers.FarmSecurityMixin):
 
     def _create_snapshot(self):
         LOG.info("Creating Redis data bundle")
-        backup_obj = backup.backup(type='snap_redis',
-                                                           volume=__redis__['volume'],
-                                                           tags=self.redis_tags)
+        backup_obj = backup.backup(type='snap_redis', volume=__redis__['volume'])
         restore = backup_obj.run()
         return restore.snapshot
 

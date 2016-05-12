@@ -1,12 +1,9 @@
-
 import prettytable
-import itertools
-import os
 import sys
+import os
 
 from scalarizr.node import __node__
-from scalarizr.node import base_dir as scalr_base_dir
-from scalarizr.queryenv import QueryEnvService
+from scalarizr.messaging.p2p import service as p2p_service
 
 
 def make_table(data_rows, header=None):
@@ -50,11 +47,8 @@ def encode(obj, encoding='ascii'):
         return obj
 
 
-def new_queryenv():
-    queryenv_creds = (__node__['queryenv_url'],
-                      __node__['server_id'],
-                      os.path.join(scalr_base_dir, __node__['crypto_key_path']))
-    queryenv = QueryEnvService(*queryenv_creds)
-    api_version = queryenv.get_latest_version()
-    queryenv = QueryEnvService(*queryenv_creds, api_version=api_version, autoretry=False) 
-    return queryenv
+def new_messaging_service():
+    return p2p_service.P2pMessageService(
+        server_id=__node__['server_id'],
+        crypto_key_path=os.path.join(__node__['etc_dir'], __node__['crypto_key_path']),
+        producer_url=__node__['producer_url'])

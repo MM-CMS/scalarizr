@@ -1,19 +1,14 @@
-from __future__ import with_statement
 '''
 Created on Aug 10, 2010
 
 @author: marat
 '''
 
-# Core
+import logging, binascii, sys
+
 from scalarizr.bus import bus
 from scalarizr.messaging import MessagingError
-
-# Utils
 from scalarizr.util import cryptotool
-
-# Stdlibs
-import logging, binascii, sys
 
 
 class P2pMessageSecurity(object):
@@ -30,7 +25,8 @@ class P2pMessageSecurity(object):
             # Decrypt message
             cnf = bus.cnf
             self._logger.debug('Decrypting message')
-            crypto_key = binascii.a2b_base64(cnf.read_key(self.crypto_key_path))
+            b64_crypto_key = cnf.read_key(self.crypto_key_path)
+            crypto_key = binascii.a2b_base64(b64_crypto_key)
             xml = cryptotool.decrypt(message, crypto_key)
 
             # Remove special chars
@@ -38,7 +34,7 @@ class P2pMessageSecurity(object):
 
         except:
             self._logger.debug('Decryption error', exc_info=sys.exc_info())
-            self._logger.debug('Crypto key: %s', crypto_key)
+            self._logger.debug('Crypto key: %s', b64_crypto_key)
             self._logger.debug('Raw message: %s', message)
             raise MessagingError('Cannot decrypt message')
 

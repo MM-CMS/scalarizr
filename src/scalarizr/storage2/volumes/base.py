@@ -1,12 +1,13 @@
-from __future__ import with_statement
+
 import os
+import re
 import sys
 import uuid
 import string
 import glob
 
 from scalarizr.bus import bus
-from scalarizr import storage2
+from scalarizr import storage2, linux, util
 from scalarizr.libs import bases
 from scalarizr.linux import coreutils, mount as mod_mount
 
@@ -17,11 +18,11 @@ LOG = storage2.LOG
 class Base(bases.ConfigDriven):
 
     def __init__(self,
-                            version='2.0',
-                            type='base',
-                            id=None,
-                            tags=None,
-                            **kwds):
+        version='2.0',
+        type='base',
+        id=None,
+        tags=None,
+        **kwds):
         super(Base, self).__init__(
                         version=version, type=type,
                         id=id, tags=tags or {}, **kwds)
@@ -42,24 +43,31 @@ class Volume(Base):
     MAX_SIZE = None
 
     def __init__(self,
-                            device=None,
-                            fstype='ext3',
-                            mpoint=None,
-                            snap=None,
-                            **kwds):
+        device=None,
+        fstype='ext3',
+        mpoint=None,
+        mount_options=None,
+        snap=None,
+        recreate_if_missing=False,
+        template=None,
+        **kwds):
 
         # Get rid of fscreated flag
         kwds.pop('fscreated', None)
 
         #Backwards compatibility with block_device handler
         from_template_if_missing = kwds.pop('from_template_if_missing', False)
-        kwds['recreate_if_missing'] = kwds.get('recreate_if_missing', False) or from_template_if_missing
+
+        recreate_if_missing = recreate_if_missing or from_template_if_missing
 
         super(Volume, self).__init__(
                         device=device,
                         fstype=fstype,
                         mpoint=mpoint,
+                        mount_options=mount_options or [],
                         snap=snap,
+                        recreate_if_missing=recreate_if_missing,
+                        template=template,
                         **kwds)
         self.features.update({'restore': True, 'grow': False, 'detach': True})
 
@@ -79,12 +87,13 @@ class Volume(Base):
         try:
             self._ensure()
         except storage2.VolumeNotExistsError, e:
-            LOG.debug("recreate_if_missing: %s" % self.recreate_if_missing)
+            LOG.debug('recreate_if_missing: %s', self.recreate_if_missing)
             if self.recreate_if_missing:
                 LOG.warning(e)
                 LOG.info('Volume %s not exists, re-creating %s from template', self.id, self.type)
-                template = self.clone()
-                vol = storage2.volume(**dict(template))
+                template = dict(self.template or self.clone())
+                LOG.debug('Template: %s', template)
+                vol = storage2.volume(**template)
                 vol.ensure(mount=bool(vol.mpoint), mkfs=True)
                 self._config = vol.config()
             else:
@@ -94,19 +103,43 @@ class Volume(Base):
             self.id = self._genid('vol-')
         if mount:
             if not self.is_fs_created() and mkfs:
-                LOG.debug('Creating %s filesystem: %s', self.fstype, self.id)
-                self.mkfs()
-            in_fstab = os.path.realpath(self.device) in mod_mount.fstab()
-            if not in_fstab:
-                self.mount()
-            if fstab and not in_fstab:
+                try:
+                    self.mkfs()
+                except storage2.OperationError as e:
+                    if 'already' not in str(e):
+                        raise
+
+            if not linux.os.windows:
+                fstab_mgr = mod_mount.fstab()
+                device_path = os.path.realpath(self.device)
+
+                if device_path in fstab_mgr:
+                    fstab_entry = fstab_mgr[device_path]
+                    if fstab_entry.mpoint != self.mpoint:
+                        LOG.debug('According to fstab device {} should be mounted to {}. '
+                            'Deleting entry...'.format(fstab_entry.device, fstab_entry.mpoint))
+                        del fstab_mgr[fstab_entry.device]
+                    else:
+                        return self.config()
+
+            self.mount()
+            if fstab and not linux.os.windows:
                 LOG.debug('Adding to fstab: %s', self.id)
-                mod_mount.fstab().add(self.device, self.mpoint, self.fstype, 'defaults,comment=scalr,nofail')
+                if self.mount_options:
+                    fsoptions = list(self.mount_options)
+                else:
+                    fsoptions = ['defaults']
+                if linux.os.ubuntu and linux.os['release'] < (16, 4):
+                    fsoptions.append('nobootwait')
+                elif not (linux.os.redhat_family and linux.os['release'] < (6, 0)):
+                    # centos 5 doesn't support nofail
+                    fsoptions.append('nofail')
+                fsoptions.append('comment=scalr')
+                mod_mount.fstab().add(self.device, self.mpoint, self.fstype, ','.join(fsoptions))
         return self.config()
 
 
     def snapshot(self, description=None, tags=None, **kwds):
-
         return self._snapshot(description, tags, **kwds)
 
 
@@ -143,8 +176,22 @@ class Volume(Base):
             self.umount()
         if not os.path.exists(self.mpoint):
             os.makedirs(self.mpoint)
+        short_args = []
+        if self.mount_options:
+            short_args += ['-o', ','.join(self.mount_options)]
         LOG.debug('Mounting %s to %s', self.id, self.mpoint)
-        mod_mount.mount(self.device, self.mpoint)
+        try:
+            mod_mount.mount(self.device, self.mpoint, *short_args)
+        except linux.LinuxError as e:
+            # XXX: SCALARIZR-1974 is for complete solution
+            if linux.os.ubuntu and \
+                re.search(r'already mounted or /mnt/(dbstorage|pgstorage|redisstorage) busy', str(e)):
+                LOG.debug('upstart already mounted database storage volume {} to {}'.format(
+                    self.device, self.mpoint))
+            else:
+                raise
+
+
         bus.fire("block_device_mounted", volume=self)
 
 
@@ -179,6 +226,9 @@ class Volume(Base):
         if fstype is None:
             return False
         else:
+            if fstype != self.fstype:
+                LOG.warn(('Device {} already formatted into {!r}. '
+                    'Ignoring {!r} fstype').format(self.device, fstype, self.fstype)) 
             self.fstype = fstype
             return True
 
@@ -186,11 +236,10 @@ class Volume(Base):
     def mkfs(self, force=False):
         self._check()
         if not force and self.is_fs_created():
-            raise storage2.OperationError(
-                                            'Filesystem on device %s is already created' % self.device)
+            raise storage2.OperationError('Filesystem on device %s is already created' % self.device)
 
         fs = storage2.filesystem(self.fstype)
-        LOG.info('Creating filesystem on %s', self.device)
+        LOG.info('Creating filesystem on %s. fstype param is %s', self.device, self.fstype)
         fs.mkfs(self.device)
 
 
@@ -220,13 +269,11 @@ class Volume(Base):
         """
 
         if not self.features.get('grow'):
-            raise storage2.StorageError("%s volume type does not'"
-                                                                    " support grow." % self.type)
+            raise storage2.StorageError("%s volume type does not support grow." % self.type)
 
         # No id, no growth
         if not self.id:
-            raise storage2.StorageError('Failed to grow volume: '
-                                                            'volume has no id.')
+            raise storage2.StorageError('Failed to grow volume: volume has no id.')
 
         # Resize_fs is true by default
         resize_fs = growth.pop('resize_fs', True)
@@ -407,3 +454,35 @@ def taken_devices():
 def taken_letters():
     lets = [x[-1] for x in taken_devices()]
     return set(lets)
+
+def rescan_scsi_host():
+    scsi_host = '/sys/class/scsi_host'
+    if os.path.exists(scsi_host):
+        for name in os.listdir(scsi_host):
+            scsi_scan_file = scsi_host + '/' + name + '/scan'
+            LOG.debug('Poking %s', scsi_scan_file)
+            with open(scsi_scan_file, 'w') as fp:
+                fp.write('- - -')
+
+def wait_device_plugged(volume_id, taken_before):
+    '''
+    This is called after attaching volume to instance
+    '''
+    def device_plugged():
+        rescan_scsi_host()
+        return taken_devices() > taken_before
+
+    util.wait_until(device_plugged,
+            start_text='Checking that volume %s is available in OS' % volume_id,
+            timeout=30,
+            sleep=1,
+            error_text='Volume %s attached but not available in OS' % volume_id)
+
+    devices = list(taken_devices() - taken_before)
+    if len(devices) > 1:
+        msg = ("While polling for attached device, got multiple new devices: {}. "
+            "Don't know which one to select").format(devices)
+        raise Exception(msg)
+    device = devices[0]
+    LOG.debug('Volume %s mapped to %s', volume_id, device)
+    return device

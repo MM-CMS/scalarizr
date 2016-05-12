@@ -1,6 +1,0 @@
-site :opscode
-
-cookbook "omnibus"
-
-cookbook "omnibus-scalarizr", git: "git@github.com:Scalr/int-cookbooks.git",
-rel: "cookbooks/omnibus-scalarizr", ref: "HEAD"

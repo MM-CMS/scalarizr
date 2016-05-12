@@ -89,7 +89,6 @@ class _Bus(Observable):
 
     init_op = None
 
-    deploy_op = None
 
 bus = _Bus()
 

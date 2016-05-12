@@ -1,6 +1,6 @@
-from scalarizr.bus import bus
 from scalarizr.adm.command import Command
 from scalarizr.node import __node__
+from scalarizr.adm.util import new_messaging_service
 
 
 class FireEvent(Command):
@@ -15,7 +15,7 @@ class FireEvent(Command):
     def __call__(self, name=None, kv=None):
         if not kv:
             kv = {}
-        msg_service = bus.messaging_service
+        msg_service = new_messaging_service()
         producer = msg_service.get_producer()
 
         producer.endpoint = __node__['producer_url']
@@ -32,10 +32,10 @@ class FireEvent(Command):
             body = params
             message_name = name
         msg = msg_service.new_message(message_name, body=body)
-        print 'Sending %s' % name
+        print('Sending %s' % name)
         producer.send('control', msg)
 
-        print "Done"
+        print("Done")
 
 
 commands = [FireEvent]

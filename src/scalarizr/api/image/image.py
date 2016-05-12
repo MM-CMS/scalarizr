@@ -9,7 +9,6 @@ from scalarizr.linux import coreutils
 from scalarizr.node import __node__
 from scalarizr.bus import bus
 from scalarizr.config import ScalarizrState
-from scalarizr.config import BuiltinPlatforms
 from scalarizr.util import Singleton
 from scalarizr.util import software
 from scalarizr.util import system2
@@ -29,11 +28,11 @@ class ImageAPI(object):
     __metaclass__ = Singleton
 
     platform_to_delegate = {
-        BuiltinPlatforms.OPENSTACK: ('scalarizr.api.image.openstack', 'OpenStackImageAPIDelegate'),
-        BuiltinPlatforms.EC2: ('scalarizr.api.image.ec2', 'EC2ImageAPIDelegate'),
-        BuiltinPlatforms.CLOUDSTACK: ('scalarizr.api.image.cloudstack', 'CloudStackImageAPIDelegate'),
-        BuiltinPlatforms.IDCF: ('scalarizr.api.image.cloudstack', 'CloudStackImageAPIDelegate'),
-        BuiltinPlatforms.GCE: ('scalarizr.api.image.gce', 'GCEImageAPIDelegate'),
+        'openstack': ('scalarizr.api.image.openstack', 'OpenStackImageAPIDelegate'),
+        'ec2': ('scalarizr.api.image.ec2', 'EC2ImageAPIDelegate'),
+        'cloudstack': ('scalarizr.api.image.cloudstack', 'CloudStackImageAPIDelegate'),
+        'idcf': ('scalarizr.api.image.cloudstack', 'CloudStackImageAPIDelegate'),
+        'gce': ('scalarizr.api.image.gce', 'GCEImageAPIDelegate'),
     }
 
     def __init__(self):
@@ -56,7 +55,7 @@ class ImageAPI(object):
     @rpc.command_method
     def prepare(self, name=None, async=False):
         self.init_delegate()
-        if not system2(('which', 'wall'), raise_exc=False)[2]:
+        if not linux.os.windows and not system2(('which', 'wall'), raise_exc=False)[2]:
             system2(('wall'), stdin=WALL_MESSAGE, raise_exc=False)
         prepare_result = self._op_api.run('api.image.prepare',
             func=self.delegate.prepare,
@@ -66,7 +65,6 @@ class ImageAPI(object):
         result = {}
         if prepare_result:
             result['prepare_result'] = prepare_result
-
         result.update(software.system_info())
         return result
 
@@ -75,15 +73,12 @@ class ImageAPI(object):
         self.init_delegate()
         cnf = bus.cnf
         saved_state = cnf.state
-        try:
-            cnf.state = ScalarizrState.REBUNDLING
-            return self._op_api.run('api.image.snapshot',
-                func=self.delegate.snapshot,
-                async=async,
-                exclusive=True,
-                func_kwds={'name': name})
-        finally:
-            cnf.state = saved_state
+        return self._op_api.run('api.image.snapshot',
+            func=self.delegate.snapshot,
+            async=async,
+            exclusive=True,
+            func_kwds={'name': name})
+
 
     @rpc.command_method
     def finalize(self, name=None, async=False):

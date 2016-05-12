@@ -9,6 +9,7 @@ class Flag(object):
 
     REBOOT = "reboot"
     HALT = "halt"
+    HIR = "hir"
 
     @classmethod
     def set(cls, name):
@@ -26,7 +27,7 @@ class Flag(object):
 
     @classmethod
     def exists(cls, name):
-         return os.path.exists(cls._get_flag_filename(name))
+        return os.path.exists(cls._get_flag_filename(name))
 
     @classmethod
     def _get_flag_filename(cls, name):

@@ -50,7 +50,7 @@ class FileSystem(object):
 
 
     def __init__(self):
-        if not os.path.exists('/sbin/mkfs.%s' % self.type):
+        if not os.path.exists('/sbin/mkfs.%s' % self.type) and not linux.os.windows:
             coreutils.modprobe(self.type)
             if self.os_packages:
                 LOG.debug('Installing OS packages')

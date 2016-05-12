@@ -1,27 +1,26 @@
-from __future__ import with_statement
 import copy
 import logging
 import xml.dom.minidom as dom
-try:
-    import json
-except ImportError:
-    import simplejson as json
+from xml.dom.minidom import getDOMImplementation
+import json
 
 from scalarizr.libs.bases import Observable
-from scalarizr.util import xml_strip
+
 
 LOG = logging.getLogger(__name__)
+
 
 class MessagingError(BaseException):
     pass
 
+
 class MessageServiceFactory(object):
     _adapters = {}
 
-    def new_service (self, name, **params):
-        if not self._adapters.has_key(name):
-            adapter =  __import__("scalarizr.messaging." + name,
-                                                      globals(), locals(), ["new_service"])
+    def new_service(self, name, **params):
+        if name not in self._adapters:
+            adapter = __import__("scalarizr.messaging.%s.service" % name,
+                globals(), locals(), ["new_service"])
             self._adapters[name] = adapter
         return self._adapters[name].new_service(**params)
 
@@ -35,16 +34,6 @@ class MessageService(object):
 
     def new_producer(self, **params):
         pass
-
-
-class MetaOptions(object):
-    SERVER_ID       = "server_id"
-    PLATFORM        = "platform" # ec2, vps, rs
-    OS                      = "os" # linux, win, sunos
-    DIST            = "dist"
-    REQUEST_ID      = "request_id"
-    TIMESTAMP       = "timestamp"
-    SZR_VERSION = "szr_version"
 
 
 class Message(object):
@@ -90,11 +79,19 @@ class Message(object):
             assert attr in json_obj, 'Attribute required: %s' % attr
             setattr(self, attr, copy.copy(json_obj[attr]))
 
-    def fromxml (self, xml):
+    def xml_strip(self, el):
+        for child in list(el.childNodes):
+            if child.nodeType == child.TEXT_NODE and child.nodeValue.strip() == '':
+                el.removeChild(child)
+            else:
+                self.xml_strip(child)
+        return el
+
+    def fromxml(self, xml):
         if isinstance(xml, str):
             xml = xml.decode('utf-8')
         doc = dom.parseString(xml.encode('utf-8'))
-        xml_strip(doc)
+        self.xml_strip(doc)
 
         root = doc.documentElement
         self.id = root.getAttribute("id")
@@ -107,8 +104,15 @@ class Message(object):
 
 
     def tojson(self, indent=None):
-        result = dict(id=self.id, name=self.name,
-                                  body=self.body, meta=self.meta)
+        body = {}
+        for k, v in self.body.items():
+            if isinstance(v, str):
+                v = v.decode('utf-8', errors='replace')
+            body[k] = v
+        result = dict(id=self.id,
+            name=self.name,
+            body=body,
+            meta=self.meta)
 
         return json.dumps(result, ensure_ascii=True, indent=indent)
 
@@ -123,11 +127,10 @@ class Message(object):
             return el.firstChild and el.firstChild.nodeValue or None
 
     def __str__(self):
-        from xml.dom.minidom import getDOMImplementation
         impl = getDOMImplementation()
         doc = impl.createDocument(None, "message", None)
 
-        root = doc.documentElement;
+        root = doc.documentElement
         root.setAttribute("id", str(self.id))
         root.setAttribute("name", str(self.name))
 
@@ -144,9 +147,9 @@ class Message(object):
     toxml = __str__
 
     def _walk_encode(self, value, el, doc):
-        if getattr(value, '__iter__', False):
+        if getattr(value, '__iter__', False) and not isinstance(value, str):
             if getattr(value, "keys", False):
-                for k, v in value.items():
+                for k, v in list(value.items()):
                     itemEl = doc.createElement(str(k))
                     el.appendChild(itemEl)
                     self._walk_encode(v, itemEl, doc)
@@ -156,14 +159,6 @@ class Message(object):
                     el.appendChild(itemEl)
                     self._walk_encode(v, itemEl, doc)
         else:
-            '''
-            if not isinstance(value, unicode):
-                    if value is not None:
-                            value = str(value)
-                    else:
-                            value = ''
-            el.appendChild(doc.createTextNode(value))
-            '''
             if value is not None and not isinstance(value, unicode):
                 value = str(value).decode('utf-8')
             el.appendChild(doc.createTextNode(value or ''))
@@ -177,25 +172,18 @@ class MessageProducer(Observable):
     """
 
     def __init__(self):
-        Observable.__init__(self)
+        Observable.__init__(self, 'before_send', 'send', 'send_error')
         self.filters = {
                 'data' : [],
                 'protocol' : []
         }
-        self.define_events(
-                # Fires before message is send
-                "before_send",
-                # Fires after message is send
-                "send",
-                # Fires when error occures
-                "send_error"
-        )
 
     def send(self, queue, message):
         pass
 
     def shutdown(self):
         pass
+
 
 class MessageConsumer(object):
     filters = None
@@ -220,11 +208,13 @@ class MessageConsumer(object):
     def shutdown(self):
         pass
 
-class Queues:
+
+class Queues(object):
     CONTROL = "control"
     LOG = "log"
 
-class Messages:
+
+class Messages(object):
     ###
     # Scalarizr events
     ###

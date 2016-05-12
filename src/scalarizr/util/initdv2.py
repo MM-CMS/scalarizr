@@ -8,19 +8,25 @@ Created on Aug 29, 2010
 import socket
 import string
 import os
-import sys
 import time
 import re
-from threading import local
 import logging
+import platform
+import time
+
+from threading import local
 
 from scalarizr import linux
+from scalarizr import exceptions
 from scalarizr.util import system2, PopenError
+if platform.system() == 'Windows':
+    import win32con
+    import win32service
 
 
 LOG = logging.getLogger(__name__)
 
-_services  = dict()
+_services = dict()
 _instances = dict()
 
 
@@ -42,12 +48,14 @@ class InitdError(BaseException):
     def message(self):
         return self.args[0]
 
+
 class Status:
     RUNNING = 0
     DEAD_PID_FILE_EXISTS = 1
     DEAD_VAR_LOCK_EXISTS = 2
     NOT_RUNNING = 3
     UNKNOWN = 4
+
 
 class InitScript(object):
     name = None
@@ -133,13 +141,16 @@ class InitScript(object):
     def __exit__(self, *args):
         return None
 
+
 class SockParam:
+
     def __init__(self, port=None, family=socket.AF_INET, type=socket.SOCK_STREAM, conn_address=None, timeout=5):
 
         self.family = family
         self.type = type
         self.conn_address = (conn_address or '127.0.0.1', int(port))
         self.timeout = timeout
+
 
 class ParametrizedInitScript(InitScript):
     name = None
@@ -169,8 +180,8 @@ class ParametrizedInitScript(InitScript):
         try:
 
             args = [self.initd_script] \
-                            if isinstance(self.initd_script, basestring) \
-                            else list(self.initd_script)
+                if isinstance(self.initd_script, basestring) \
+                else list(self.initd_script)
             args.append(action)
             out, err, returncode = system2(args, close_fds=True, preexec_fn=os.setsid)
         except PopenError, e:
@@ -182,12 +193,6 @@ class ParametrizedInitScript(InitScript):
         if self.socks and (action != "stop" and not (action == 'reload' and not self.running)):
             for sock in self.socks:
                 wait_sock(sock)
-
-#               if self.pid_file:
-#                       if (action == "start" or action == "restart") and not os.path.exists(self.pid_file):
-#                               raise InitdError("Cannot start %s. pid file %s doesn't exists" % (self.name, self.pid_file))
-#                       if action == "stop" and os.path.exists(self.pid_file):
-#                               raise InitdError("Cannot stop %s. pid file %s still exists" % (self.name, self.pid_file))
 
         return True
 
@@ -243,25 +248,56 @@ class ParametrizedInitScript(InitScript):
 
 
 class Daemon(object):
+
     '''
     Alternate implementation (from updclient project)
     TODO: we should merge Daemon and ParametrizedInitScript classes and update clients code
     '''
+
     def __init__(self, name):
         self.name = name
-        if linux.os.name == 'Ubuntu' and linux.os.release >= (10, 4):
+        if linux.os.name == 'Ubuntu' and linux.os['release'] >= (10, 4):
             self.init_script = ['service', self.name]
         else:
             self.init_script = ['/etc/init.d/' + self.name]
-    
+
     if linux.os.windows_family:
         def ctl(self, command, raise_exc=True):
+            # sending start signal via service control will not fail if
+            # a service can accept start command but cannot change its state into 'Running'
+            # we should instead poll a service state until we succeed or timeout
+            if command.lower() == 'start':
+                RUNNING = 4
+                TIMEOUT = 3
+
+                GENERIC_READ = win32con.GENERIC_READ
+                SC_MANAGER_ALL_ACCESS = win32service.SC_MANAGER_ALL_ACCESS
+
+                __handle = win32service.OpenSCManager(None, None, GENERIC_READ)
+                handle = win32service.OpenService(__handle, self.name, SC_MANAGER_ALL_ACCESS)
+                try:
+                    win32service.StartService(handle, None)
+                except Exception, e:
+                    raise InitdError('Could not complete StartService command.\n, {0}'.format(e))
+                elapsed = 0
+                while elapsed < TIMEOUT and win32service.QueryServiceStatusEx(handle)['CurrentState'] != RUNNING:
+                    time.sleep(0.1)
+                    elapsed += 0.1
+
+                if win32service.QueryServiceStatusEx(handle)['CurrentState'] == RUNNING:
+                    return
+
+                raise exceptions.Timeout(
+                    "{0} service failed to change its state"
+                    " into 'Running' after {1}-second timeout.".format(self.name, TIMEOUT))
+
+            # handles stop on windows
             return linux.system(('sc', command, self.name), raise_exc=raise_exc)
     else:
         def ctl(self, command, raise_exc=True):
-            return linux.system(self.init_script + [command], 
-                    raise_exc=raise_exc, close_fds=True, preexec_fn=os.setsid)
-    
+            return linux.system(self.init_script + [command],
+                                raise_exc=raise_exc, close_fds=True, preexec_fn=os.setsid)
+
     def restart(self):
         LOG.info('Restarting %s', self.name)
         if linux.os.windows_family:
@@ -270,7 +306,7 @@ class Daemon(object):
             self.ctl('start')
         else:
             self.ctl('restart')
-    
+
     def forcerestart(self):
         LOG.info('Forcefully restarting %s', self.name)
         self.ctl('stop')
@@ -281,19 +317,19 @@ class Daemon(object):
                 os.kill(pid, 9)
         finally:
             self.ctl('start')
-    
+
     def condrestart(self):
         LOG.info('Conditional restarting %s', self.name)
         self.ctl('condrestart')
-    
+
     def start(self):
         LOG.info('Starting %s', self.name)
         self.ctl('start')
-    
+
     def stop(self):
         LOG.info('Stopping %s', self.name)
         self.ctl('stop')
-    
+
     @property
     def running(self):
         if linux.os.windows_family:
@@ -304,26 +340,27 @@ class Daemon(object):
                 if name.lower() == 'state':
                     return value.lower().endswith('running')
         else:
-            return not self.ctl('status', raise_exc=False)[2] 
-
+            return not self.ctl('status', raise_exc=False)[2]
 
 
 def explore(name, init_script_cls):
     _services[name] = init_script_cls
 
+
 def lookup(name):
     '''
     Lookup init script object by service name
     '''
-    if not _services.has_key(name):
+    if name not in _services:
         raise InitdError('No service has been explored with name %s ' % name)
 
-    if not _instances.has_key(name):
+    if name not in _instances:
         _instances[name] = _services[name]()
 
     return _instances[name]
 
-def wait_sock(sock = None):
+
+def wait_sock(sock=None):
     if not isinstance(sock, SockParam):
         raise InitdError('Socks parameter must be instance of SockParam class')
 
@@ -338,4 +375,4 @@ def wait_sock(sock = None):
         except:
             time.sleep(1)
             pass
-    raise InitdError ("Service unavailable after %d seconds of waiting" % sock.timeout)
+    raise InitdError("Service unavailable after %d seconds of waiting" % sock.timeout)

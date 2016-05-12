@@ -1020,9 +1020,11 @@ class BuiltinPlatforms:
     CLOUDSTACK      = 'cloudstack'
     IDCF            = 'idcf'
     UCLOUD          = 'ucloud'
+    VERIZON         = 'verizon'
     GCE             = 'gce'
     OPENSTACK       = 'openstack'
     LXC             = 'lxc'
+    AZURE           = 'azure'
 
     @staticmethod
     def values():
@@ -1085,4 +1087,3 @@ class ScalarizrState:
     INITIALIZING = "initializing"
     RUNNING = "running"
     UNKNOWN = "unknown"
-    REBUNDLING = "rebundling"

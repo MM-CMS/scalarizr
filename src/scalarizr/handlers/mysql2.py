@@ -15,25 +15,21 @@ import threading
 # Core
 from scalarizr.bus import bus
 from scalarizr.messaging import Messages
-from scalarizr.handlers import ServiceCtlHandler, DbMsrMessages, HandlerError, \
-        build_tags
+from scalarizr.handlers import ServiceCtlHandler, DbMsrMessages, HandlerError
 import scalarizr.services.mysql as mysql_svc
 from scalarizr.service import CnfController, _CnfManifest
 from scalarizr.services import ServiceError
 from scalarizr.platform import UserDataOptions
 from scalarizr.libs import metaconf
-from scalarizr.util import system2, firstmatched, initdv2, software, cryptotool, software
+from scalarizr.util import system2, firstmatched, initdv2, cryptotool, software
 
 
 from scalarizr import storage2, linux
-from scalarizr.linux import iptables, coreutils, pkgmgr
+from scalarizr.linux import iptables, coreutils
 from scalarizr.services import backup
 from scalarizr.services import mysql2 as mysql2_svc  # backup/restore providers
 from scalarizr.node import __node__
-from scalarizr.api import service as preset_service
 from scalarizr.api import mysql as mysql_api
-from scalarizr.api import percona as percona_api
-from scalarizr.api import mariadb as mariadb_api
 from scalarizr.api import operation as operation_api
 
 # Libs
@@ -248,7 +244,7 @@ class MysqlHandler(DBMSRHandler):
 
         self.preset_provider = mysql_svc.MySQLPresetProvider()
 
-        bus.on(init=self.on_init, reload=self.on_reload)
+        bus.on(init=self.on_init, start=self.on_start, reload=self.on_reload)
         bus.define_events(
                 'before_mysql_data_bundle',
                 'mysql_data_bundle',
@@ -296,8 +292,8 @@ class MysqlHandler(DBMSRHandler):
         bus.on("before_host_up", self.on_before_host_up)
         bus.on("before_reboot_start", self.on_before_reboot_start)
 
+    def on_start(self):
         self._insert_iptables_rules()
-
         if __node__['state'] == 'running':
             vol = storage2.volume(__mysql__['volume'])
             vol.ensure(mount=True)
@@ -387,9 +383,7 @@ class MysqlHandler(DBMSRHandler):
         LOG.debug('backup in __mysql__: %s', 'backup' in __mysql__)
 
         __mysql__['volume'].mpoint = __mysql__['storage_dir']
-        __mysql__['volume'].tags = self.resource_tags()
         if 'backup' in __mysql__:
-            __mysql__['backup'].tags = self.resource_tags()
             __mysql__['backup'].description = self._data_bundle_description()
 
 
@@ -650,8 +644,7 @@ class MysqlHandler(DBMSRHandler):
                         bak = backup.backup(
                                         type='snap_mysql',
                                         volume=__mysql__['volume'] ,
-                                        description=self._data_bundle_description(),
-                                        tags=self.resource_tags())
+                                        description=self._data_bundle_description())
                     restore = bak.run()
 
                 # Send message to Scalr
@@ -818,7 +811,10 @@ class MysqlHandler(DBMSRHandler):
 
 
     def on_before_reboot_start(self, *args, **kwargs):
-        self.mysql.service.stop('Instance is going to reboot')
+        try:
+            self.mysql.service.stop('Instance is going to reboot')
+        except:
+            LOG.warn("Failed to stop service: {}".format(sys.exc_info()[1]))
 
 
     def generate_datadir(self):
@@ -930,7 +926,9 @@ class MysqlHandler(DBMSRHandler):
         self._change_selinux_ctx()
 
         storage_valid = self._storage_valid()
-        if not storage_valid and 'backup' not in __mysql__:
+        if not storage_valid \
+            and 'backup' not in __mysql__ \
+            and __mysql__['volume'].type != 'lvm':
             __mysql__['backup'] = backup.backup(
                             type='snap_mysql',
                             volume=__mysql__['volume'])
@@ -940,7 +938,22 @@ class MysqlHandler(DBMSRHandler):
         self.mysql.my_cnf.delete_options(['mysqld/log_bin', 'mysqld/log-bin'])
 
         if not storage_valid:
+            if software.mysql_software_info().version >= (5, 6, 8) \
+                and os.path.exists('/usr/share/mysql'):
+                # Work around 'FATAL ERROR: Could not find my-default.cnf'
+                # See https://dev.mysql.com/doc/refman/5.6/en/mysql-install-db.html
+                # > As of MySQL 5.6.8, on Unix platforms, mysql_install_db creates a default 
+                # > option file named my.cnf in the base installation directory. This file 
+                # > is created from a template included in the distribution package 
+                # > named my-default.cnf
+                shutil.copy(__mysql__['my.cnf'], '/usr/share/mysql/my-default.cnf')
+
+            if linux.os.redhat_family and linux.os['release'] < (6, 0):
+                # Work around [ERROR] You need to use --log-bin to make --binlog-format work.
+                self.mysql.my_cnf.delete_options(['mysqld/binlog_format'])
+
             linux.system(['mysql_install_db', '--user=mysql', '--datadir=%s' % __mysql__['data_dir']])
+
 
         self._change_my_cnf()
 
@@ -1290,7 +1303,3 @@ class MysqlHandler(DBMSRHandler):
 
         LOG.debug('Replication master is changed to host %s', host)
 
-
-    def resource_tags(self):
-        purpose = '%s-' % __mysql__['behavior'] + ('master' if int(__mysql__['replication_master']) == 1 else 'slave')
-        return build_tags(purpose, 'active')

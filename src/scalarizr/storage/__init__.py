@@ -358,8 +358,12 @@ RHEL_DEVICE_ORDERING_BUG = False
 if linux.os.redhat_family:
     # Check that system is affected by devices ordering bug
     # https://bugzilla.redhat.com/show_bug.cgi?id=729340
-    rootfs = [entry for entry in mount.mounts() if entry.mpoint == '/' and entry.device.startswith('/dev')][0]
-    RHEL_DEVICE_ORDERING_BUG = rootfs.device.startswith('/dev/xvde')
+    try:
+        rootfs = [entry for entry in mount.mounts() if entry.mpoint == '/' and entry.device.startswith('/dev')][0]
+    except IndexError:
+        RHEL_DEVICE_ORDERING_BUG = False
+    else:
+        RHEL_DEVICE_ORDERING_BUG = rootfs.device.startswith('/dev/xvde')
 
 
 def get_system_devname(devname):

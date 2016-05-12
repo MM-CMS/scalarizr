@@ -10,32 +10,43 @@ import random
 import logging
 import shutil
 import tempfile
+import platform
 
-from scalarizr import util
+from scalarizr import util, linux
 from scalarizr.util import software
+from scalarizr.util import firstmatched
+from scalarizr.linux import coreutils
 from scalarizr.linux import pkgmgr, os as os_dist
 from scalarizr.bus import bus
-from scalarizr.storage2.cloudfs import FileTransfer
-from scalarizr.handlers import HandlerError, rebundle as rebundle_hndlr
+from scalarizr.storage2 import largetransfer
+from scalarizr.messaging import Messages, Queues
+from scalarizr.handlers import Handler, HandlerError, rebundle as rebundle_hndlr
 
 
 
 def get_handlers():
-    return [GceRebundleHandler()]
+    if linux.os.windows:
+        return [GceRebundleWindowsHandler()]
+    else:
+        return [GceRebundleLinuxHandler()]
 
 
 LOG = logging.getLogger(__name__)
 
 ROLEBUILDER_USER = 'scalr-rolesbuilder'
 
-class GceRebundleHandler(rebundle_hndlr.RebundleHandler):
+
+class GceRebundleLinuxHandler(rebundle_hndlr.RebundleHandler):
     exclude_dirs = set(['/tmp', '/proc', '/dev',
-                        '/mnt' ,'/var/lib/google/per-instance',
+                        '/mnt', '/var/lib/google/per-instance',
                         '/sys', '/cdrom', '/media', '/run', '/selinux'])
     exclude_files = ('/etc/ssh/.host_key_regenerated',
                      '/lib/udev/rules.d/75-persistent-net-generator.rules')
 
-    gcimagebundle_pkg_name = 'python-gcimagebundle' if os_dist.debian_family else 'gcimagebundle'
+    if os_dist.debian_family:
+        gcimagebundle_pkg_name = 'gce-imagebundle' if os_dist.ubuntu else 'python-gcimagebundle'
+    else:
+        gcimagebundle_pkg_name = 'gcimagebundle'
 
     def rebundle(self):
         rebundle_dir = tempfile.mkdtemp()
@@ -44,8 +55,17 @@ class GceRebundleHandler(rebundle_hndlr.RebundleHandler):
             pl = bus.platform
             proj_id = pl.get_numeric_project_id()
             proj_name = pl.get_project_id()
-            cloudstorage = pl.new_storage_client()
+            cloudstorage = pl.get_storage_conn()
 
+            # Determine the root filesystem size
+            devices = coreutils.df()
+            root_disk = firstmatched(lambda x: x.mpoint == '/', devices)
+            if not root_disk:
+                raise HandlerError("Can't find root device")
+             # in bytes adjusted to 512 block device size
+            fssize = (root_disk.size * 1000 / 512) * 512
+
+            # Old code. Should be reworked
             if os.path.exists('/dev/root'):
                 root_part_path = os.path.realpath('/dev/root')
             else:
@@ -79,10 +99,11 @@ class GceRebundleHandler(rebundle_hndlr.RebundleHandler):
             gc_img_bundle_bin = software.which('gcimagebundle')
 
             o, e, p = util.system2((gc_img_bundle_bin,
-                        '-d', root_device,
-                        '-e', ','.join(self.exclude_dirs),
-                        '-o', rebundle_dir,
-                        '--output_file_name', arch_name), raise_exc=False)
+                                    '-d', root_device,
+                                    '-e', ','.join(self.exclude_dirs),
+                                    '--fssize', str(fssize),
+                                    '-o', rebundle_dir,
+                                    '--output_file_name', arch_name), raise_exc=False)
             if p:
                 raise HandlerError('Gcimagebundle util returned non-zero code %s. Stderr: %s' % (p, e))
 
@@ -90,16 +111,25 @@ class GceRebundleHandler(rebundle_hndlr.RebundleHandler):
             try:
                 LOG.info('Uploading compressed image to cloud storage')
                 tmp_bucket_name = 'scalr-images-%s-%s' % (random.randint(1, 1000000), int(time.time()))
-                remote_path = 'gcs://%s/%s' % (tmp_bucket_name, arch_name)
-                arch_size = os.stat(arch_path).st_size
-                uploader = FileTransfer(src=arch_path, dst=remote_path)
+                remote_dir = 'gcs://%s' % tmp_bucket_name
 
+                def progress_cb(progress):
+                    LOG.debug('Uploading {perc}%'.format(perc=progress / os.path.getsize(arch_path)))
+
+                uploader = largetransfer.Upload(arch_path, remote_dir, simple=True,
+                                                progress_cb=progress_cb)
+                uploader.apply_async()
                 try:
-                    upload_result = uploader.run()
-                    if upload_result['failed']:
-                        errors =  [str(failed['exc_info'][1]) for failed in upload_result['failed']]
-                        raise HandlerError('Image upload failed. Errors:\n%s' % '\n'.join(errors))
-                    assert arch_size == upload_result['completed'][0]['size']
+                    try:
+                        uploader.join()
+                    except:
+                        if uploader.error:
+                            error = uploader.error[1]
+                        else:
+                            error = sys.exc_info()[1]
+                        msg = 'Image upload failed. Error:\n{error}'
+                        msg = msg.format(error=error)
+                        raise HandlerError(msg)
                 except:
                     with util.capture_exception(LOG):
                         objs = cloudstorage.objects()
@@ -114,7 +144,7 @@ class GceRebundleHandler(rebundle_hndlr.RebundleHandler):
         goog_image_name = self._role_name.lower().replace('_', '-') + '-' + str(int(time.time()))
         try:
             LOG.info('Registering new image %s' % goog_image_name)
-            compute = pl.new_compute_client()
+            compute = pl.get_compute_conn()
 
             image_url = 'http://storage.googleapis.com/%s/%s' % (tmp_bucket_name, arch_name)
 
@@ -130,6 +160,7 @@ class GceRebundleHandler(rebundle_hndlr.RebundleHandler):
             operation = req.execute()['name']
 
             LOG.info('Waiting for image to register')
+
             def image_is_ready():
                 req = compute.globalOperations().get(project=proj_id, operation=operation)
                 res = req.execute()
@@ -151,6 +182,40 @@ class GceRebundleHandler(rebundle_hndlr.RebundleHandler):
                 cloudstorage.buckets().delete(bucket=tmp_bucket_name).execute()
             except:
                 e = sys.exc_info()[1]
-                LOG.error('Faled to remove image compressed source: %s' % e)
+                LOG.error('Failed to remove image compressed source: %s' % e)
 
         return '%s/images/%s' % (proj_name, goog_image_name)
+
+
+class GceRebundleWindowsHandler(Handler):
+    logger = None
+
+    def __init__(self):
+        self._logger = logging.getLogger(__name__)
+
+    def accept(self, message, queue, behaviour=None, platform=None, os=None, dist=None):
+        return message.name == Messages.WIN_PREPARE_BUNDLE
+
+    def on_Win_PrepareBundle(self, message):
+        try:
+            linux.system('gcesysprep', shell=True)
+            os_info = {}
+            uname = platform.uname()
+            os_info['version'] = uname[2]
+            os_info['string_version'] = ' '.join(uname).strip()
+
+            self.send_message(Messages.WIN_PREPARE_BUNDLE_RESULT, dict(
+                status="ok",
+                bundle_task_id=message.bundle_task_id,
+                os=os_info
+            ))
+
+        except (Exception, BaseException), e:
+            self._logger.exception(e)
+            last_error = hasattr(e, "error_message") and e.error_message or str(e)
+            self.send_message(Messages.WIN_PREPARE_BUNDLE_RESULT, dict(
+                status="error",
+                last_error=last_error,
+                bundle_task_id=message.bundle_task_id
+            ))
+

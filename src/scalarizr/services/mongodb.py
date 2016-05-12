@@ -64,6 +64,21 @@ MAX_START_TIMEOUT = 600
 MAX_STOP_TIMEOUT = 180
 
 
+def autoreconnect(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        max_retry = 3
+        attempts = 0
+        while True:
+            try:
+                return f(*args, **kwargs)
+            except pymongo.errors.AutoReconnect, e:
+                attempts += 1
+                if attempts >= max_retry:
+                    raise e
+                time.sleep(0.3)
+    return wrapper
+
                                 
 class MongoDBDefaultInitScript(initdv2.ParametrizedInitScript):
     socket_file = None
@@ -76,7 +91,7 @@ class MongoDBDefaultInitScript(initdv2.ParametrizedInitScript):
                 
     def __init__(self):
         initd_script = firstmatched(os.path.exists, ('/etc/init.d/mongodb', '/etc/init.d/mongod'))
-        if linux.os.ubuntu and linux.os.release >= (10, 4):
+        if linux.os.ubuntu and linux.os['release'] >= (10, 4):
             initd_script = ('/usr/sbin/service', os.path.basename(initd_script))
         initdv2.ParametrizedInitScript.__init__(self, name=SERVICE_NAME, 
                         initd_script=initd_script)
@@ -291,10 +306,10 @@ class MongoDB(BaseService):
             wait_until(lambda: self.status == 1 or self.status == 2, timeout=3600, sleep=2)
     """
 
-
+    @autoreconnect
     def remove_replset_info(self):
         self._logger.info("Removing previous replica set info")
-        return self.cli.connection.local.system.replset.remove()
+        return self.cli.connection.drop_database('local')
 
 
     @property
@@ -819,22 +834,6 @@ class Mongos(object):
         if cls.is_running:
             cls.stop()
             cls.start()
-
-
-def autoreconnect(f):
-    @functools.wraps(f)
-    def wrapper(*args, **kwargs):
-        max_retry = 3
-        attempts = 0
-        while True:
-            try:
-                return f(*args, **kwargs)
-            except pymongo.errors.AutoReconnect, e:
-                attempts += 1
-                if attempts >= max_retry:
-                    raise e
-                time.sleep(0.3)
-    return wrapper
 
 
 class MongoCLIMeta(type):

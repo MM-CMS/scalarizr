@@ -1,4 +1,3 @@
-from __future__ import with_statement
 """
 Created on Sep 10, 2010
 
@@ -7,7 +6,7 @@ Created on Sep 10, 2010
 
 from scalarizr.util import system2, PopenError
 from scalarizr import linux
-from scalarizr.linux import coreutils, pkgmgr, which
+from scalarizr.linux import pkgmgr, which
 import os, re, zipfile, glob, platform
 
 __all__ = ('all_installed', 'software_info', 'explore', 'which')
@@ -36,60 +35,18 @@ def explore(name, lookup_fn):
 
 def system_info(verbose=False):
 
-    def check_module(module):
-        try:
-            return not coreutils.modprobe(module, dry_run=True)[2]
-        except:
-            return False
-
     ret = {}
-    ret['software'] = []
-    installed_list = all_installed()
-    for software_inf in installed_list:
-        v = dict(
-                name=software_inf.name,
-                version='.'.join([str(x) for x in software_inf.version])
-        )
-        if verbose:
-            v['string_version'] = software_inf.string_version
-
-        ret['software'].append(v)
-
 
     ret['os'] = {}
     ret['os']['version'] = '{0} {1} {2}'.format(linux.os['name'], linux.os['release'], linux.os['codename']).strip()
     ret['os']['string_version'] = ' '.join(platform.uname()).strip()
 
     ret['dist'] = {
-            'distributor': linux.os['name'].lower(),
-            'release': str(linux.os['release']),
-            'codename': linux.os['codename']
-    }
+        'distributor': linux.os['name'].lower(),
+        'release': str(linux.os['release']),
+        'codename': linux.os['codename']}
 
     ret['os']['arch'] = linux.os['arch']
-
-    ret['storage'] = {}
-    ret['storage']['fstypes'] = []
-
-    for fstype in ['xfs', 'ext3', 'ext4']:
-        try:
-            retcode = coreutils.modprobe(fstype, dry_run=True)[1]
-        except:
-            retcode = 1
-        exe = which('mkfs.%s' % fstype)
-        if not retcode and exe:
-            ret['storage']['fstypes'].append(fstype)
-
-    # Raid levels support detection
-    if which('mdadm'):
-        for module in  ('raid0', 'raid1', 'raid456'):
-            ret['storage'][module] = 1 if check_module(module) else 0
-
-    # Lvm2 support detection
-    if which('dmsetup') and all(map(check_module, ('dm_mod', 'dm_snapshot'))):
-        ret['storage']['lvm'] = 1
-    else:
-        ret['storage']['lvm'] = 0
 
     return ret
 
@@ -106,9 +63,9 @@ class SoftwareInfo(object):
     string_version = None
 
     def __init__(self, name, version, string_version):
-        self.name               = name
+        self.name = name
         self.string_version = string_version
-        ver_nums                = map(int, version.split('.'))
+        ver_nums = map(int, version.split('.'))
         if len(ver_nums) < 3:
             for _ in range(len(ver_nums), 3):
                 ver_nums.append(0)
@@ -423,7 +380,14 @@ def chef_software_info():
     if not binary:
         raise SoftwareError("Can't find executable for chef client")
 
-    version_string = linux.system((binary, '-v'), shell=bool(linux.os.windows))[0].strip()
+    try:
+        version_string = linux.system((binary, '-v'), shell=bool(linux.os.windows))[0].strip()
+    except OSError as e:
+        if e.errno == 2:        
+            # This happen when chef-client has a non existed path in shebang.
+            version_string = None
+        else:
+            raise
     if not version_string:
         raise SoftwareError
 

@@ -73,18 +73,23 @@ class IpListBuilder(Handler):
 
         for role in self._queryenv.list_roles():
             for host in role.hosts:
+                ipaddr = host.internal_ip or host.external_ip
+                if not ipaddr:
+                    continue
                 self._modify_tree(
-                        role.name,
-                        role.behaviour,
-                        host.internal_ip or host.external_ip,
-                        modfn=self._create_file,
-                        replication_master=host.replication_master
-                )
+                    role.name,
+                    role.behaviour,
+                    ipaddr,
+                    modfn=self._create_file,
+                    replication_master=host.replication_master)
 
     def on_HostUp(self, message):
         behaviour = message.behaviour
         ip = message.local_ip or message.remote_ip
         rolename = message.role_name
+        if not ip:
+            self._logger.debug('Skip host without ip')
+            return
 
         if ip and rolename and behaviour:
             self._logger.debug("Add host (role_name: %s, behaviour: %s, ip: %s)",
@@ -97,6 +102,9 @@ class IpListBuilder(Handler):
         behaviour = message.behaviour
         ip = message.local_ip or message.remote_ip
         rolename = message.role_name
+        if not ip:
+            self._logger.debug('Skip host without ip')
+            return
 
         if ip and rolename and behaviour:
             self._logger.debug("Remove host (role_name: %s, behaviour: %s, ip: %s)",

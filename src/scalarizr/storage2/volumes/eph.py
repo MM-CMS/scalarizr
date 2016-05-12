@@ -7,11 +7,12 @@ import logging
 import tempfile
 import urlparse
 import threading
+import subprocess
 
 from scalarizr import storage2
 from scalarizr.libs import metaconf
 from scalarizr.linux import coreutils, mount
-from scalarizr.storage2 import cloudfs
+from scalarizr.storage2 import cloudfs, largetransfer
 from scalarizr.storage2.volumes import base
 
 
@@ -28,8 +29,8 @@ class EphVolume(base.Volume):
     """
 
 
-    def __init__(self, vg=None, disk=None, disks=None, 
-            size=None, cloudfs_dir=None, **kwds):
+    def __init__(self, vg=None, disk=None, disks=None,
+                 size=None, cloudfs_dir=None, **kwds):
         # Compatibility with 1.0
         snap_backend = kwds.pop('snap_backend', None)
         if snap_backend:
@@ -41,11 +42,11 @@ class EphVolume(base.Volume):
         kwds.pop('lvm_group_cfg', None)
 
         super(EphVolume, self).__init__(
-                vg=vg, 
-                disk=disk, 
-                disks=disks, 
-                size=size or '80%', 
-                cloudfs_dir=cloudfs_dir, 
+                vg=vg,
+                disk=disk,
+                disks=disks,
+                size=size or '80%',
+                cloudfs_dir=cloudfs_dir,
                 **kwds)
 
         self._lvm_volume = None
@@ -103,20 +104,21 @@ class EphVolume(base.Volume):
                 self.mpoint = tmp_mpoint
 
             try:
-                transfer = cloudfs.LargeTransfer(self.snap.path, self.mpoint + '/')
+                transfer = largetransfer.Download(self.snap.path, self.mpoint + '/', simple=True)
                 self.mount()
                 if hasattr(self.snap, 'data_size'):
                     fs_free = coreutils.statvfs(self.mpoint)['avail']
                     if fs_free < int(self.snap.data_size):
                         raise storage2.StorageError('Not enough free space'
-                                        ' on device %s to restore snapshot.' %
-                                        self.device)
+                                                    ' on device %s to restore snapshot.' %
+                                                    self.device)
 
-                result = transfer.run()
-                if result.get('failed'):
-                    err = result['failed'][0]['exc_info'][1]
-                    raise storage2.StorageError('Failed to download snapshot'
-                                                                            'data. %s' % err)
+                transfer.apply_async()
+                try:
+                    transfer.join()
+                except:
+                    err = sys.exc_info()[1]
+                    raise storage2.StorageError('Failed to download snapshot data. %s' % err)
             except:
                 e = sys.exc_info()[1]
                 raise storage2.StorageError("Snapshot restore error: %s" % e)
@@ -215,15 +217,15 @@ class EphSnapshot(base.Snapshot):
             self.data_size = coreutils.statvfs(mpoint)['used']
 
             try:
-                transfer = cloudfs.LargeTransfer(
-					src=mpoint + '/',
-                        dst=path,
-                        tar_it=True,
-                        gzip_it=True,
-                        tags=tags,
-                        transfer_id=self.id)
+                cmd = ['/bin/tar', 'cp', mpoint]
+                stream = subprocess.Popen(cmd, stdout=subprocess.PIPE, close_fds=True).stdout
+                src = cloudfs.NamedStream(stream, 'lvm_snapshot', streamer='tar', extension='tar')
+                dst = path
+                transfer = largetransfer.Upload(src, dst, tags=tags, transfer_id=self.id)
                 self._snap_status = self.IN_PROGRESS
-                manifesto = transfer.run()
+                transfer.apply_async()
+                transfer.join()
+                manifesto = transfer.manifest
                 self.path = manifesto.cloudfs_path
                 self._snap_status = self.COMPLETED
 
@@ -240,4 +242,3 @@ class EphSnapshot(base.Snapshot):
 
 storage2.volume_types['eph'] = EphVolume
 storage2.snapshot_types['eph'] = EphSnapshot
-

@@ -106,7 +106,7 @@ class WsgiApplication(Security):
                             ('Date', date)]
 
             start_response('200 OK', headers)
-            return result
+            return [result, ]
         except:
             if sys.exc_info()[0] in (SystemExit, KeyboardInterrupt):
                 raise

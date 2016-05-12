@@ -10,7 +10,7 @@ import datetime
 
 from apiclient.errors import HttpError
 
-from scalarizr import storage2
+from scalarizr import linux, storage2
 from scalarizr.bus import bus
 from scalarizr.node import __node__
 from scalarizr.storage2.volumes import base
@@ -34,11 +34,12 @@ class GcePersistentVolume(base.Volume):
 
 
     def __init__(self, name=None, link=None, size=None, zone=None,
-                                            last_attached_to=None, **kwargs):
+                 last_attached_to=None, disk_type="pd-standard", **kwargs):
         name = name or 'scalr-disk-%s' % uuid.uuid4().hex[:8]
         super(GcePersistentVolume, self).__init__(name=name, link=link,
                                                   size=size, zone=zone,
                                                   last_attached_to=last_attached_to,
+                                                  disk_type=disk_type,
                                                   **kwargs)
         self.features.update({'grow': True})
 
@@ -108,13 +109,18 @@ class GcePersistentVolume(base.Volume):
                         temp_snap = self.snapshot('volume')
                         garbage_can.append(temp_snap)
                         new_name = self.name + zone
-                        create_request_body = dict(name=new_name,
-                                                   sourceSnapshot=to_current_api_version(temp_snap.link))
+                        create_request_body = dict(
+                            name=new_name, sourceSnapshot=to_current_api_version(temp_snap.link))
                         create = True
 
                 attach = False
                 if create:
                     disk_name = create_request_body['name']
+                    if "pd-standard" != self.disk_type:
+                        disk_type = gce_util.get_disktype(conn=connection,
+                            project_id=project_id, zone=zone, disktype=self.disk_type)
+                        create_request_body.update({'type': disk_type['selfLink']})
+
                     LOG.debug('Creating new GCE disk %s' % disk_name)
                     op = connection.disks().insert(project=project_id,
                                                    zone=zone,
@@ -151,30 +157,49 @@ class GcePersistentVolume(base.Volume):
                         attach = True
 
                 if attach:
-                    LOG.debug('Attaching disk %s to current instance' % self.name)
-                    try:
-                        op = connection.instances().attachDisk(instance=server_name, project=project_id,
-                                            zone=zone, body=dict(deviceName=self.name,
-                                                                    source=self.link,
-                                                                    mode="READ_WRITE",
-                                                                    type="PERSISTENT")).execute()
-                    except:
-                        e = sys.exc_info()[1]
-                        if 'resource was not found' in str(e):
-                            raise storage2.VolumeNotExistsError(self.link)
-                        raise
+                    for _ in range(10):
+                        try:
+                            LOG.debug('Attaching disk %s to current instance' % self.name)
+                            try:
+                                op = connection.instances().attachDisk(
+                                    instance=server_name, 
+                                    project=project_id,
+                                    zone=zone, 
+                                    body=dict(
+                                        deviceName=self.name,
+                                        source=self.link,
+                                        mode="READ_WRITE",
+                                        type="PERSISTENT")).execute()
+                            except:
+                                e = sys.exc_info()[1]
+                                if 'resource was not found' in str(e):
+                                    raise storage2.VolumeNotExistsError(self.link)
+                                raise
 
-                    gce_util.wait_for_operation(connection, project_id, op['name'], zone=zone)
-                    disk_devicename = self.name
+                            gce_util.wait_for_operation(connection, project_id, op['name'], zone=zone)
+                            disk_devicename = self.name
+                            break
+                        except:
+                            e = sys.exc_info()[1]
+                            #  sometimes occurs when volume was just detached from another instance
+                            if 'is already being used by' in str(e):
+                                LOG.debug('%s. Retrying in 1s', str(e))
+                                time.sleep(1)
+                            else:
+                                raise
 
-                for i in range(10):
-                    device = gce_util.devicename_to_device(disk_devicename)
-                    if device:
-                        break
-                    LOG.debug('Device not found in system. Retrying in 1s.')
-                    time.sleep(1)
+                if not linux.os.windows:
+                    for i in range(10):
+                        device = gce_util.devicename_to_device(disk_devicename)
+                        if device:
+                            break
+                        LOG.debug('Device not found in system. Retrying in 1s.')
+                        time.sleep(1)
+                    else:
+                        msg = "Disk should be attached, but corresponding device not found in system"
+                        raise storage2.StorageError(msg)
                 else:
-                    raise storage2.StorageError("Disk should be attached, but corresponding device not found in system")
+                    device = disk_devicename
 
                 self.device = device
                 self.last_attached_to = server_name

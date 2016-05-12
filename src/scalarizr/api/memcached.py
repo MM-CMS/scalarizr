@@ -6,7 +6,6 @@ from scalarizr import linux
 from scalarizr.util import initdv2
 from scalarizr.linux import pkgmgr
 from scalarizr.util import Singleton
-from scalarizr import exceptions
 from scalarizr.api import BehaviorAPI
 
 
@@ -56,13 +55,15 @@ class MemcachedInitScript(initdv2.ParametrizedInitScript):
         elif linux.os.debian_family:
             pid_file = "/var/run/memcached.pid"
 
-        initd_script = '/etc/init.d/memcached'
-        if not os.path.exists(initd_script):
-            msg = "Cannot find Memcached init script at %s. Make sure that memcached is installed"
-            raise Exception(msg % initd_script)
+        if linux.os.redhat_family and linux.os["release"].version[0] == 7:
+            initd_script = ("/sbin/service", "memcached")
+        else:
+            initd_script = '/etc/init.d/memcached'
+            if not os.path.exists(initd_script):
+                msg = "Cannot find Memcached init script at %s. Make sure that memcached is installed"
+                raise Exception(msg % initd_script)
 
         initdv2.ParametrizedInitScript.__init__(self,
                 'memcached', initd_script, pid_file, socks=[initdv2.SockParam(11211)])
 
 initdv2.explore('memcached', MemcachedInitScript)
-

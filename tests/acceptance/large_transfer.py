@@ -76,7 +76,7 @@ def setup_feature(feat):
                 "storage", "v1beta2", *STORAGE_FULL_SCOPE)
 
         gcs.bus.platform.get_numeric_project_id.return_value = '876103924605'
-        gcs.bus.platform.new_storage_client = lambda: gsm.get_service()
+        gcs.bus.platform.get_storage_conn = lambda: gsm.get_service()
 
     elif STORAGE == "swift":
         _RESTORE.append((swift.SwiftFileSystem, "_get_connection",

@@ -132,12 +132,12 @@ stop() {
     echo
     [ $retval -eq 0 ] && rm -f $lockfile
 
-	__zomby_pids=$(ps aux | grep 'bin/scalarizr' | awk '{ print $2 }')
-	if [ "$__zomby_pids" ]; then
-		for __zomby_pid in $__zomby_pids; do
-			kill -9 $__zomby_pid 2>/dev/null || :
-		done
-	fi
+    zomby_pids=$(ps -eo pid,comm,cmd | grep 'bin/scalarizr' | grep -v 'grep' | grep -v 'szr worker' | awk '{ print $1 }')
+    if [ "$zomby_pids" ]; then
+        for zomby_pid in $zomby_pids; do
+            kill -9 $zomby_pid 2>/dev/null
+        done
+    fi
 
     return $retval
 }

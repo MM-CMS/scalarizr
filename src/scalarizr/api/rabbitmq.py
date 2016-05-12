@@ -1,5 +1,4 @@
 from scalarizr.util.cryptotool import pwgen
-from scalarizr.services.rabbitmq import rabbitmq as rabbitmq_sgt
 from scalarizr.services import rabbitmq as rabbitmq_module
 from scalarizr import rpc
 from scalarizr import linux
@@ -23,7 +22,7 @@ class RabbitMQAPI(BehaviorAPI):
 
     def __init__(self):
         self.service = rabbitmq_module.RabbitMQInitScript()
-        self.rabbitmq = rabbitmq_sgt
+        self.rabbitmq = rabbitmq_module.RabbitMQ()
 
     @rpc.command_method
     def start_service(self):
@@ -114,12 +113,12 @@ class RabbitMQAPI(BehaviorAPI):
         os_vers = linux.os['version']
         requirements = None
         if os_name == 'ubuntu':
-            requirements = ['rabbitmq-server>=2.6,<3.5']
+            requirements = ['rabbitmq-server>=2.6,<3.7']
         elif os_name == 'debian':
-            requirements = ['rabbitmq-server>=3.0,<3.5']
+            requirements = ['rabbitmq-server>=3.0,<3.7']
         elif linux.os.redhat_family:
             if os_vers >= '6':
-                requirements = ['rabbitmq-server>=3.1,<3.5']
+                requirements = ['rabbitmq-server>=3.1,<3.7']
             elif os_vers >= '5':
                 raise exceptions.UnsupportedBehavior(
                         cls.behavior,
@@ -129,4 +128,3 @@ class RabbitMQAPI(BehaviorAPI):
                     cls.behavior,
                     "Not supported on {0} os family".format(linux.os['family']))
         return pkgmgr.check_software(requirements, system_packages)[0]
-

@@ -1,36 +1,39 @@
-from __future__ import with_statement
 '''
 Created on Mar 11, 2010
 @author: marat
 '''
 
-import logging
-import platform
-
-import scalarizr
-from scalarizr.bus import bus
-from scalarizr.node import __node__
-from scalarizr.handlers import HandlerError, build_tags
-from scalarizr.util import system2, wait_until, firstmatched
-from scalarizr import linux
-from scalarizr.linux import mount
-
-from scalarizr.handlers import rebundle as rebundle_hdlr
-from scalarizr.handlers import Handler
-from scalarizr.messaging import Messages
-from scalarizr.linux import coreutils
-from scalarizr.linux.tar import Tar
-from scalarizr.storage2.volumes import ebs as ebsvolume
-from scalarizr.storage2.cloudfs import FileTransfer
-from scalarizr.storage2 import volume, filesystem
-from scalarizr.libs.metaconf import Configuration
-
 from binascii import hexlify
-from xml.dom.minidom import Document
 from datetime import datetime
-import time, os, re, shutil, glob
-import string
+from xml.dom.minidom import Document
+import glob
 import hashlib
+import logging
+import os
+import platform
+import re
+import shutil
+import string
+import sys
+import time
+
+from common.utils import mixutil
+from common.utils import subprocess2
+from scalarizr import linux
+from scalarizr.bus import bus
+from scalarizr.handlers import Handler
+from scalarizr.handlers import HandlerError
+from scalarizr.handlers import rebundle as rebundle_hdlr
+from scalarizr.libs.metaconf import Configuration
+from scalarizr.linux import coreutils
+from scalarizr.linux import mount
+from scalarizr.linux.tar import Tar
+from scalarizr.messaging import Messages
+from scalarizr.node import __node__
+from scalarizr.storage2 import volume, filesystem, largetransfer
+from scalarizr.storage2.volumes import ebs as ebsvolume
+from scalarizr.util import system2, wait_until, firstmatched
+import scalarizr
 
 from boto.exception import BotoServerError
 from boto.ec2.blockdevicemapping import EBSBlockDeviceType, BlockDeviceMapping
@@ -43,8 +46,8 @@ import mimetypes
 mimetypes.init()
 
 
-def get_handlers ():
-    return [Ec2RebundleWindowsHandler()] if linux.os.windows_family else  [Ec2RebundleHandler()]
+def get_handlers():
+    return [Ec2RebundleWindowsHandler()] if linux.os.windows_family else [Ec2RebundleHandler()]
 
 LOG = rebundle_hdlr.LOG
 
@@ -98,7 +101,7 @@ class Ec2RebundleHandler(rebundle_hdlr.RebundleHandler):
 
             iops = float(iops)
             if iops < MIN_IOPS_VALUE or iops > MAX_IOPS_VALUE:
-                raise HandlerError('IOPS must be between %s and %s' % 
+                raise HandlerError('IOPS must be between %s and %s' %
                     (MIN_IOPS_VALUE, MAX_IOPS_VALUE))
 
             size = float(rv_template['size'])
@@ -150,7 +153,10 @@ class Ec2RebundleHandler(rebundle_hdlr.RebundleHandler):
             attached_vols = ec2_conn.get_all_volumes(filters=vol_filters)
             root_vol = None
             for vol in attached_vols:
-                if instance.root_device_name == vol.attach_data.device:
+                # Strip ending digits to make /dev/sda1 -eq /dev/sda
+                if instance.root_device_name == vol.attach_data.device or \
+                    re.sub(r'\d+$', '', instance.root_device_name) == vol.attach_data.device:
+
                     root_vol = vol
                     break
             else:
@@ -182,8 +188,8 @@ class Ec2RebundleHandler(rebundle_hdlr.RebundleHandler):
             # Instance store
             self._strategy = self._instance_store_strategy_cls(
                 self, self._role_name, image_name, self._excludes,
-                image_size = root_disk.size / 1000,  # in Mb
-                s3_bucket_name = self._s3_bucket_name)
+                image_size=root_disk.size / 1000,  # in Mb
+                s3_bucket_name=self._s3_bucket_name)
 
 
     def rebundle(self):
@@ -566,29 +572,22 @@ class RebundleInstanceStoreStrategy(RebundleStratery):
 
     def _upload_image_files(self, files, manifest_path):
         dst = self._platform.scalrfs.images()
-        trn = FileTransfer(src=files, dst=dst)
-        res = trn.run()
-        #trn = Transfer(pool=4, max_attempts=5, logger=LOG)
-        #trn.upload(upload_files, self._platform.scalrfs.images())
 
-        if res["failed"]:
-            sources = map(lambda job: job["src"], res["failed"])
-            exceptions = map(lambda job: job["exc_info"][1], res["failed"])
-            str_exceptions = map(lambda exc: ': '.join([repr(exc).split('(')[0],
-                                                        exc.message]),
-                                 exceptions)
-            str_fails = map(lambda pair: '  ' + ' => '.join(pair), zip(sources, str_exceptions))
-            msg = ("Failed uploading the image files to {dst}\n"
-                   "{failed} out of {total} failed:\n"
-                   "\n"
-                   "{fails}"
-            ).format(dst=dst,
-                     failed=len(res["failed"]),
-                     total=len(res["completed"]) + len(res["failed"]),
-                     fails='\n'.join(str_fails)
-            )
+        def progress_cb(progress):
+            LOG.debug('Uploading %s bytes' % progress)
+
+        uploader = largetransfer.Upload(files, dst, simple=True, progress_cb=progress_cb)
+        uploader.apply_async()
+        try:
+            uploader.join()
+        except:
+            if uploader.error:
+                error = uploader.error[1]
+            else:
+                error = sys.exc_info()[1]
+            msg = 'Image upload failed. Error:\n{error}'
+            msg = msg.format(error=error)
             raise HandlerError(msg)
-
         manifest_path = os.path.join(self._platform.scalrfs.images(), os.path.basename(manifest_path))
         return manifest_path.split('s3://')[1]
 
@@ -669,7 +668,7 @@ class RebundleEbsStrategy(RebundleStratery):
         LOG.info('Creating snapshot of root device image %s', vol.id)
         description = "Root device snapshot created from role: %s instance: %s" \
                                 % (self._role_name, self._platform.get_instance_id())
-        self._snap = vol.snapshot(description, tags=build_tags(state='temporary'), nowait=False)
+        self._snap = vol.snapshot(description, tags={'scalr-status': 'temporary'}, nowait=False)
 
         #LOG.debug('Checking that snapshot %s is completed', self._snap.id)
         #wait_until(lambda: self._snap.state in (storage.Snapshot.COMPLETED, storage.Snapshot.FAILED), logger=LOG)
@@ -782,16 +781,38 @@ class LinuxEbsImage(rebundle_hdlr.LinuxImage):
         self._instance_id = instance_id
         self._ebs_config = config_template.copy() if config_template else {}
         self._ebs_config['type'] = 'ebs'
-
         if volume_id:
             self._ebs_config['id'] = volume_id
 
+        rootfs = firstmatched(lambda x: x.mpoint == '/', coreutils.df())
+        if not rootfs:
+            raise HandlerError("Can't find root device")
+        self._rootfs_devname = rootfs.device
+
 
     def _create_image(self):
-        self._ebs_config['tags'] = build_tags(state='temporary')
+        self._ebs_config['tags'] = {'scalr-status': 'temporary'}
         self.ebs_volume = volume(self._ebs_config)
         self.ebs_volume.ensure(fstab=False)
-        return self.ebs_volume.device
+        if os.path.exists(self._rootfs_devname[:-1]):  
+            # if we have a /dev/sda device, copy partition table
+            return self._copy_mbr_to(self.ebs_volume.device)
+        else:
+            return self.ebs_volume.device
+
+    def _copy_mbr_to(self, dst_part):
+        src_part = self._rootfs_devname[:-1]
+        LOG.info('Copying MBR from {} to {}'.format(src_part, dst_part))
+        subprocess2.check_output('dd if={} of={} bs=512 count=1'.format(src_part, dst_part), shell=True)
+        subprocess2.check_output('sfdisk -R {}'.format(dst_part), shell=True)
+
+        dst_device = dst_part + self._rootfs_devname[-1]  # e.g. /dev/xvdf1
+        mixutil.try_until(lambda: os.path.exists(dst_device), interval=0.2, timeout=5, 
+            try_msg='Waiting for partition table on {}'.format(dst_part),
+            error_msg="Partition table wan't loaded on {}".format(dst_part))
+
+        LOG.debug('Copied MBR from {} to {}'.format(src_part, dst_part))
+        return dst_device      
 
 
     def _read_pt(self, dev_name):
@@ -919,52 +940,53 @@ class LinuxEbsImage(rebundle_hdlr.LinuxImage):
                 LOG.debug('Copied sucesfull from %s to %s', self._volume, self.mpoint)
                 self.mpoint = old_mpoint
 
-        system2("sync", shell=True) #Flush buffers
+        system2("sync", shell=True)  # Flush buffers
 
-        self.mpoint = os.path.join(self.mpoint, '%s%s'%(os.path.basename(self.devname),
-                                os.path.basename(rdev_partition)[-1]))
+        self.mpoint = os.path.join(self.mpoint, '%s%s' % (os.path.basename(self.devname),
+                                   os.path.basename(rdev_partition)[-1]))
 
         return self.mpoint
 
     def make(self):
-        LOG.info("Make EBS volume (size: %sGb) from volume %s (excludes: %s)",
+        LOG.info("Making EBS volume (size: %sGb) from volume %s (excludes: %s)",
                         self._ebs_config['size'], self._volume, ":".join(self.excludes))
+        rebundle_hdlr.LinuxImage.make(self)
 
-        #TODO: need transmit flag `copy_partition_table` from Ec2RebundleHandler.before_rebundle
-        """ list of all mounted devices """
-        list_device = coreutils.df()
-        """ root device partition like `df(device='/dev/sda2', ..., mpoint='/')` """
-        root_disk = firstmatched(lambda x: x.mpoint == '/', list_device)
-        if not root_disk:
-            raise HandlerError("Can't find root device")
-        """ detecting root device like rdev=`sda` """
-        rdev = None
-        for el in os.listdir('/sys/block'):
-            if os.path.basename(root_disk.device) in os.listdir('/sys/block/%s'%el):
-                rdev = el
-                break
-        if not rdev and os.path.exists('/sys/block/%s'%os.path.basename(root_disk.device)):
-            rdev = root_disk.device
-        """ list partition of root device """
-        list_rdevparts = [dev.device for dev in list_device
-                                                        if dev.device.startswith('/dev/%s' % rdev)]
-        """ if one partition we use old method """
-        if len(list(set(list_rdevparts))) > 1:
-            self.copy_partition_table = True
+        # #TODO: need transmit flag `copy_partition_table` from Ec2RebundleHandler.before_rebundle
+        # """ list of all mounted devices """
+        # list_device = coreutils.df()
+        # """ root device partition like `df(device='/dev/sda2', ..., mpoint='/')` """
+        # root_disk = firstmatched(lambda x: x.mpoint == '/', list_device)
+        # if not root_disk:
+        #     raise HandlerError("Can't find root device")
+        # """ detecting root device like rdev=`sda` """
+        # rdev = None
+        # for el in os.listdir('/sys/block'):
+        #     if os.path.basename(root_disk.device) in os.listdir('/sys/block/%s'%el):
+        #         rdev = el
+        #         break
+        # if not rdev and os.path.exists('/sys/block/%s'%os.path.basename(root_disk.device)):
+        #     rdev = root_disk.device
+        # """ list partition of root device """
+        # list_rdevparts = [dev.device for dev in list_device
+        #                                                 if dev.device.startswith('/dev/%s' % rdev)]
+        # """ if one partition we use old method """
+        # if len(list(set(list_rdevparts))) > 1:
+        #     self.copy_partition_table = True
 
 
-        """ for one partition in root device EBS volume using LinuxImage.make(self)
-                else copy partitions of root device """
-        if self.copy_partition_table:
-            self.make_partitions()
-        else:
-            rebundle_hdlr.LinuxImage.make(self)
+        # """ for one partition in root device EBS volume using LinuxImage.make(self)
+        #         else copy partitions of root device """
+        # if self.copy_partition_table:
+        #     self.make_partitions()
+        # else:
+        #     rebundle_hdlr.LinuxImage.make(self)
 
     def umount(self):
         if self.copy_partition_table:
             """ self.mpoint like `/mnt/img-mnt/sda2' root partition copy
                     finding all new mounted partitions in `/mnt/img-mnt`... """
-            mpt = '/'+ '/'.join(filter(None, self.mpoint.split('/'))[:-1])
+            mpt = '/' + '/'.join(filter(None, self.mpoint.split('/'))[:-1])
             mparts = [dev.mpoint for dev in coreutils.df() if dev.mpoint.startswith(mpt)]
             LOG.debug('Partitions which will be unmounting: %s' % mparts)
             for mpt in mparts:
@@ -979,7 +1001,7 @@ class LinuxEbsImage(rebundle_hdlr.LinuxImage):
         mp = None
         if self.copy_partition_table:
             """ self.mountpoint like /mnt/img-mnt/sdg2 """
-            mp = '/'+ '/'.join(filter(None, self.mpoint.split('/'))[:-1])
+            mp = '/' + '/'.join(filter(None, self.mpoint.split('/'))[:-1])
             """ removing all directories inside mountpoint"""
             if os.path.exists(mp):
                 for el in os.listdir(mp):
@@ -1047,8 +1069,10 @@ class AmiManifest:
 
         def el(name):
             return doc.createElement(name)
+
         def txt(text):
             return doc.createTextNode('%s' % (text))
+
         def ap(parent, child):
             parent.appendChild(child)
 
@@ -1120,7 +1144,7 @@ class AmiManifest:
         if self.product_codes:
             product_codes_elem = el("product_codes")
             for product_code in self.product_codes:
-                product_code_elem = el("product_code");
+                product_code_elem = el("product_code")
                 product_code_value = txt(product_code)
                 ap(product_code_elem, product_code_value)
                 ap(product_codes_elem, product_code_elem)
@@ -1174,7 +1198,7 @@ class AmiManifest:
         if self.ancestor_ami_ids:
             ancestry_elem = el("ancestry")
             for ancestor_ami_id in self.ancestor_ami_ids:
-                ancestor_id_elem = el("ancestor_ami_id");
+                ancestor_id_elem = el("ancestor_ami_id")
                 ancestor_id_value = txt(ancestor_ami_id)
                 ap(ancestor_id_elem, ancestor_id_value)
                 ap(ancestry_elem, ancestor_id_elem)
@@ -1262,8 +1286,8 @@ class AmiManifest:
         digest.update(string_to_sign)
         dig = digest.digest()
 
-        sig = hexlify(system2('openssl rsautl -sign -inkey {0}'.format(self.user_private_key_path), 
-                        shell=True, stdin=dig)[0])
+        sig = hexlify(system2('openssl rsautl -sign -inkey {0}'.format(self.user_private_key_path),
+                      shell=True, stdin=dig)[0])
 
         # /manifest/signature
         signature_elem = el("signature")
@@ -1298,6 +1322,7 @@ class Ec2RebundleWindowsHandler(Handler):
         return message.name == Messages.WIN_PREPARE_BUNDLE
 
     def on_Win_PrepareBundle(self, message):
+        # deprecated since 2015/08/04
         try:
             """
             cmd = ('ec2config.exe -sysprep')
@@ -1328,16 +1353,16 @@ class Ec2RebundleWindowsHandler(Handler):
             os_info['string_version'] = ' '.join(uname).strip()
 
             self.send_message(Messages.WIN_PREPARE_BUNDLE_RESULT, dict(
-                status = "ok",
-                bundle_task_id = message.bundle_task_id,
-                os = os_info
+                status="ok",
+                bundle_task_id=message.bundle_task_id,
+                os=os_info
             ))
 
         except (Exception, BaseException), e:
             self._logger.exception(e)
             last_error = hasattr(e, "error_message") and e.error_message or str(e)
             self.send_message(Messages.WIN_PREPARE_BUNDLE_RESULT, dict(
-                status = "error",
-                last_error = last_error,
-                bundle_task_id = message.bundle_task_id
+                status="error",
+                last_error=last_error,
+                bundle_task_id=message.bundle_task_id
             ))

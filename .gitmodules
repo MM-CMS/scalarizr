@@ -1,0 +1,3 @@
+[submodule "fatmouse"]
+	path = fatmouse
+	url = git@github.com:Scalr/fatmouse.git

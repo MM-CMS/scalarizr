@@ -8,7 +8,6 @@ Created on Mar 14, 2012
 import time
 import Queue
 import threading
-import weakref
 import logging
 from weakref import WeakValueDictionary
 
@@ -18,6 +17,7 @@ import sqlite3
 
 LOG = logging.getLogger(__name__)
 GLOBAL_TIMEOUT = 30
+
 
 class Proxy(object):
 
@@ -284,6 +284,7 @@ class SqliteServer(object):
 class _NULL(object):
     pass
 
+
 class SQLiteServerThread(threading.Thread):
 
     ready = None
@@ -303,4 +304,4 @@ class SQLiteServerThread(threading.Thread):
 
 
 def wait_for_server_thread(t):
-    wait_until(lambda: t.ready == True, sleep = 0.1)
+    wait_until(lambda: t.ready == True, sleep=0.1)

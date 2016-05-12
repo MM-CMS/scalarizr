@@ -5,42 +5,77 @@ import threading
 import time
 import logging
 import traceback
+import datetime
 
 from scalarizr import rpc
+from scalarizr import bollard
 from scalarizr.node import __node__
 from scalarizr.util import Singleton
 
 
 LOG = logging.getLogger(__name__)
 
+
 class OperationError(Exception):
     pass
+
 
 class AlreadyInProgressError(OperationError):
     pass
 
+
 class OperationNotFoundError(OperationError):
     pass
 
-class OperationAPI(object):
-    """
-    Basic API to control operations.
 
-    Namespace::
+class OperationAPIAdapter(object):
 
-        operation
-    """
+    def __init__(self):
+        self._apis = [OperationAPI(), OperationAPI2()]
+
+    def _get_api(self, operation_id):
+        for api in self._apis:
+            operations = (op['id'] for op in api.list())
+            if operation_id in operations:
+                return api
+
+        raise OperationNotFoundError("'%s' not found" % operation_id)
+
+    @rpc.query_method
+    def list(self):
+        return reduce(lambda x, y: x + y, (api.list() for api in self._apis))
+
+    @rpc.query_method
+    def result(self, operation_id=None):
+        return self._get_api(operation_id).result(operation_id)
+
+    @rpc.command_method
+    def cancel(self, operation_id=None):
+        return self._get_api(operation_id).cancel(operation_id)
+
+    @rpc.query_method
+    def has_in_progress(self):
+        return any(api.has_in_progress() for api in self._apis)
+
+
+class OperationAPI2(object):
 
     __metaclass__ = Singleton
 
-    def __init__(self):
-        self._ops = {}
-        self.rotate_thread = threading.Thread(
-            name='Rotate finished operations', 
-            target=OperationAPI.rotate_runnable
-        )
-        self.rotate_thread.setDaemon(True)
-        self.rotate_thread.start()
+    @rpc.query_method
+    def list(self):
+        """
+        Returns list of all operations currently executing
+        and executed since Scalarizr start
+
+        :rtype: list
+        """
+        keys = ('id', 'name', 'status', 'start_date', 'finish_date')
+        retval = []
+        for task in bollard.Task.load_tasks():
+            serialized_data = task.scalr_serialize()
+            retval.append(dict((k, serialized_data[k]) for k in keys))
+        return retval
 
     @rpc.query_method
     def result(self, operation_id=None):
@@ -50,13 +85,79 @@ class OperationAPI(object):
         :param operation_id: Operation ID
         :type operation_id: str
         """
-        return self.get(operation_id).serialize()
+        if operation_id is None:
+            return None
+        task = bollard.Task.load_by_id(operation_id)
+        if not task:
+            msg = "'{}' not found".format(operation_id)
+            raise OperationNotFoundError(msg)
+        return task.scalr_serialize()
 
     @rpc.command_method
     def cancel(self, operation_id=None):
         """
         Cancels operation.
 
+        :param operation_id: Operation ID
+        :type operation_id: str
+        """
+        if operation_id is None:
+            return
+        __node__['bollard'].revoke(operation_id, force=False)
+
+    @rpc.query_method
+    def has_in_progress(self):
+        for task in bollard.Task.load_tasks(state='running'):
+            return True
+        return False
+
+
+class OperationAPI(object):
+    """
+    Basic API to control operations.
+    Namespace::
+        operation
+    """
+
+    __metaclass__ = Singleton
+
+    def __init__(self):
+        self._ops = {}
+        self.rotate_thread = threading.Thread(
+            name='Rotate finished operations',
+            target=OperationAPI.rotate_runnable
+        )
+        self.rotate_thread.setDaemon(True)
+        self.rotate_thread.start()
+
+    @rpc.query_method
+    def list(self):
+        """
+        Returns list of all operations currently executing
+        and executed since Scalarizr start
+        :rtype: list
+        """
+        keys = ('id', 'name', 'status', 'start_date', 'finish_date')
+        retval = []
+        for op in self._ops.values():
+            op = op.serialize()
+            retval.append(dict(zip(keys, [op[k] for k in keys])))
+        return retval
+
+
+    @rpc.query_method
+    def result(self, operation_id=None):
+        """
+        Returns result of an operation by operation ID.
+        :param operation_id: Operation ID
+        :type operation_id: str
+        """
+        return self.get(operation_id).serialize()
+
+    @rpc.command_method
+    def cancel(self, operation_id=None):
+        """
+        Cancels operation.
         :param operation_id: Operation ID
         :type operation_id: str
         """
@@ -88,8 +189,7 @@ class OperationAPI(object):
             ret = self._ops.values()
         if finished_before:
             now = time.time()
-            ret = [op for op in ret 
-                    if op.finished_at and now - op.finished_at > finished_before]
+            ret = [op for op in ret if op.finished_at and now - op.finished_at > finished_before]
         if status:
             if status == 'finished':
                 ret = [op for op in ret if op.finished]
@@ -118,7 +218,6 @@ class OperationAPI(object):
                 api.remove(op.operation_id)
 
 
-
 class _LogHandler(logging.Handler):
     def __init__(self, op):
         self.op = op
@@ -134,8 +233,8 @@ class _LogHandler(logging.Handler):
 
 class Operation(object):
 
-    def __init__(self, name, func, func_args=None, func_kwds=None, 
-                cancel_func=None, exclusive=False, notifies=True):
+    def __init__(self, name, func, func_args=None, func_kwds=None,
+                 cancel_func=None, exclusive=False, notifies=True):
         self.operation_id = str(uuid.uuid4())
         self.name = name
         ops = OperationAPI().find(name, status='in-progress', exclusive=True)
@@ -165,12 +264,12 @@ class Operation(object):
         self.logger = logging.getLogger('scalarizr.ops.{0}'.format(self.name))
         hdlr = _LogHandler(self)
         hdlr.setLevel(logging.INFO)
-        self.logger.addHandler(hdlr)    
+        self.logger.addHandler(hdlr)
 
     def _in_progress(self):
         self.status = 'in-progress'
-        self.started_at = time.time() 
-        try: 
+        self.started_at = time.time()
+        try:
             self._completed(self.func(self, *self.func_args, **self.func_kwds))
             if self.canceled:
                 raise Exception('User canceled')
@@ -187,12 +286,12 @@ class Operation(object):
 
     @property
     def finished(self):
-        return self.status in ('failed', 'completed') 
+        return self.status in ('failed', 'completed')
 
     def run_async(self):
         print 'run_async'
         self.thread = threading.Thread(
-            name='Task {0}'.format(self.name), 
+            name='Task {0}'.format(self.name),
             target=self._in_progress
         )
         self.async = True
@@ -205,8 +304,7 @@ class Operation(object):
             try:
                 self.cancel_func(self)
             except:
-                msg = ('Cancelation function failed for '
-                        'operation {0}').format(self.operation_id)
+                msg = ('Cancelation function failed for operation {0}').format(self.operation_id)
                 self.logger.exception(msg)
 
     def _failed(self, *exc_info):
@@ -215,8 +313,8 @@ class Operation(object):
         if self.canceled:
             self.logger.warn('Operation "%s" (id: %s) canceled', self.name, self.operation_id)
         else:
-            self.logger.error('Operation "%s" (id: %s) failed. Reason: %s', 
-                    self.name, self.operation_id, self.error[1], exc_info=self.error)
+            self.logger.error('Operation "%s" (id: %s) failed. Reason: %s',
+                              self.name, self.operation_id, self.error[1], exc_info=self.error)
 
     def _completed(self, result=None):
         self.result = result
@@ -230,7 +328,13 @@ class Operation(object):
             'result': self.result,
             'error': None,
             'trace': None,
-            'logs': self.logs
+            'logs': self.logs,
+            'start_date': self.started_at and \
+                    datetime.datetime.fromtimestamp(self.started_at).isoformat() or \
+                    None,
+            'finish_date': self.finished_at and \
+                    datetime.datetime.fromtimestamp(self.finished_at).isoformat() or \
+                    None
         }
         if self.error:
             ret['error'] = str(self.error[1])

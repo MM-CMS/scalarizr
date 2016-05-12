@@ -1,5 +1,4 @@
 
-import re
 import os
 import sys
 import logging
@@ -11,14 +10,20 @@ from scalarizr.util import firstmatched
 from scalarizr.util.initdv2 import ParametrizedInitScript
 from scalarizr import linux
 
+
 class UpdateSshAuthorizedKeysError(BaseException):
     pass
 
-def get_handlers ():
+
+def get_handlers():
+    return []
+    """
     if linux.os['family'] == 'Windows':
         return []
     else:
         return [SSHKeys()]
+    """
+
 
 class SSHKeys(Handler):
     sshd_config_path = '/etc/ssh/sshd_config'
@@ -45,14 +50,12 @@ class SSHKeys(Handler):
 
     def _setup_sshd_config(self):
         # Enable public key authentification
-        sshd_config = open(self.sshd_config_path)
-        lines = sshd_config.readlines()
-        sshd_config.close()
+        with open(self.sshd_config_path, 'r') as fp:
+            lines = fp.readlines()
 
         updates = {
-            'RSAAuthentication' : 'yes',
-            'PubkeyAuthentication' : 'yes',
-            'AuthorizedKeysFile' :  '%h/.ssh/authorized_keys'
+            'RSAAuthentication': 'yes',
+            'PubkeyAuthentication': 'yes',
         }
         if linux.os.amazon:
             updates.update({'PermitRootLogin': 'without-password'})
@@ -61,9 +64,15 @@ class SSHKeys(Handler):
         new_lines = []
         for line in lines:
             for key, new_value in updates.items():
+                if line.startswith('AuthorizedKeysFile'):
+                    authorized_keys_file = line.strip().split(' ')[-1].strip()
+                    authorized_keys_file = authorized_keys_file.replace('%h', os.environ['HOME'])
+                    authorized_keys_file = authorized_keys_file.replace('%u', os.environ['USER'])
+                    authorized_keys_file = authorized_keys_file.replace('%%', '%')
+                    self.authorized_keys_file = authorized_keys_file
                 if line.startswith(key):
                     try:
-                        old_value = line.split(' ', 1)[1].strip()
+                        old_value = line.strip().split(' ', 1)[1].strip()
                     except IndexError:
                         old_value = None
                     if old_value != new_value:
@@ -84,9 +93,8 @@ class SSHKeys(Handler):
 
         if new_lines != lines:
             self._logger.debug('Writing new %s', self.sshd_config_path)
-            fp = open(self.sshd_config_path, 'w')
-            fp.write(''.join(new_lines))
-            fp.close()
+            with open(self.sshd_config_path, 'w') as fp:
+                fp.write(''.join(new_lines))
             try:
                 self._sshd_init.restart()
             except:
@@ -109,8 +117,6 @@ class SSHKeys(Handler):
         if not message.add and not message.remove:
             self._logger.debug('Empty key lists in message. Nothing to do.')
             return
-
-        self._setup_sshd_config()
 
         ak = self._read_ssh_keys_file()
         if message.add:

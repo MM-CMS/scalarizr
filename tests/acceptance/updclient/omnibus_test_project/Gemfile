@@ -1,0 +1,5 @@
+source 'https://rubygems.org'
+
+gem 'fpm'
+gem 'omnibus', :git => 'git://github.com/Scalr/omnibus.git', :ref => 'd005c3be63e86cccceaa37fbd92abd2425390202'
+gem 'omnibus-software', :git => 'git://github.com/Scalr/omnibus-software.git', :ref => '7eb0998979dffb2c5cb5b7ff272d55ab9fdb8009'

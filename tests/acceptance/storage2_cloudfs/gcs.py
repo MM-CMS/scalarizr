@@ -36,7 +36,7 @@ def upload(step):
                 "storage", "v1", *STORAGE_FULL_SCOPE)
 
         gcs.bus.platform.get_numeric_project_id.return_value = '876103924605'
-        gcs.bus.platform.new_storage_client = lambda: gsm.get_service()
+        gcs.bus.platform.get_storage_conn = lambda: gsm.get_service()
 
         world.gcs = gcs.GCSFileSystem()
         world.tmpdir = tempfile.mkdtemp()

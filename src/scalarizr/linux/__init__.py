@@ -65,12 +65,15 @@ class __os(dict):
         self._detect_dist()
         if not self['family'] == 'Windows':
             self._detect_kernel()
+            self._detect_init()
 
 
     def __getattr__(self, name):
         name = name.lower()
         if name.endswith('_family'):
             return self['family'].lower() == name[0:-7]
+        elif name.endswith('_init'):
+            return self['init'].lower() == name[0:-5]
         else:
             return self['name'].lower() == name
 
@@ -94,10 +97,10 @@ class __os(dict):
                 #     DISTRIB_RELEASE='10.10'
                 #     DISTRIB_CODENAME='squeeze'
                 #     DISTRIB_DESCRIPTION='Ubuntu 10.10'
-                regex = re.compile('^(DISTRIB_(?:ID|RELEASE|CODENAME|DESCRIPTION))=(?:\'|")?([\w\s\.-_]+)(?:\'|")?')
+                regex = re.compile('^DISTRIB_((?:ID|RELEASE|CODENAME|DESCRIPTION))=(?:\'|")?([\w\s\.-_]+)(?:\'|")?')
                 match = regex.match(line)
                 if match:
-                    # Adds: lsb_distrib_{id,release,codename,description}
+                    # Adds: lsb_{id,release,codename,description}
                     self['lsb_%s' % match.groups()[0].lower()] = match.groups()[1].rstrip()
         try:
             import lsb_release
@@ -106,13 +109,9 @@ class __os(dict):
                 self['lsb_%s' % key.lower()] = value  # override /etc/lsb-release
         except ImportError:
             pass
-        if 'lsb_distrib_codename' in self:
-            self['codename'] = self['lsb_distrib_codename']
-        elif 'lsb_codename' in self:
+        if 'lsb_codename' in self:
             self['codename'] = self['lsb_codename']
-        if 'lsb_distrib_release' in self:
-            self['release'] = self['lsb_distrib_release']
-        elif 'lsb_release' in self:
+        if 'lsb_release' in self:
             self['release'] = self['lsb_release']
 
         if osmod.path.isfile('/etc/arch-release'):
@@ -121,10 +120,10 @@ class __os(dict):
         elif osmod.path.isfile('/etc/debian_version'):
             self['name'] = 'Debian'
             self['family'] = 'Debian'
-            if 'lsb_distrib_id' in self:
-                if 'GCEL' in self['lsb_distrib_id']:
+            if 'lsb_id' in self:
+                if 'GCEL' in self['lsb_id']:
                     self['name'] = 'GCEL'
-                if 'Ubuntu' in self['lsb_distrib_id']:
+                if 'Ubuntu' in self['lsb_id']:
                     self['name'] = 'Ubuntu'
                 elif osmod.path.isfile('/etc/issue.net') and \
                         'Ubuntu' in open('/etc/issue.net').readline():
@@ -220,6 +219,12 @@ class __os(dict):
         if re.search(r'i\d86', arch):
             arch = 'i386'
         self['arch'] = arch
+
+    def _detect_init(self):
+        init = 'sysv'
+        if osmod.path.realpath('/sbin/init').endswith('systemd'):
+            init = 'systemd'
+        self['init'] = init
 
     def _detect_cloud(self):
         pass

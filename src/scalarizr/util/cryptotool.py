@@ -23,7 +23,7 @@ except ImportError:
 
 
 crypto_algo = dict(name="des_ede3_cbc", key_size=24, iv_size=8)
-
+aes256_crypto_algo = dict(name="aes_256_cfb", key_size=32, iv_size=16)
 
 def keygen(length=40):
     return binascii.b2a_base64(os.urandom(length))
@@ -34,20 +34,38 @@ if with_m2crypto:
         iv = key[-crypto_algo["iv_size"]:]              # Use last m bytes as IV
         return Cipher(crypto_algo["name"], skey, iv, op_enc)
 
-    def encrypt (s, key):
+    def encrypt(s, key):
         c = _init_cipher(key, 1)
         ret = c.update(s)
         ret += c.final()
         del c
         return binascii.b2a_base64(ret)
 
-    def decrypt (s, key):
+    def decrypt(s, key):
         c = _init_cipher(key, 0)
         ret = c.update(binascii.a2b_base64(s))
         ret += c.final()
         del c
         return ret
 
+    def _init_aes256_cipher(key, op_enc=1):
+        skey = key[0:aes256_crypto_algo["key_size"]]   # Use first n bytes as crypto key
+        iv = key[-aes256_crypto_algo["iv_size"]:]              # Use last m bytes as IV
+        return Cipher(aes256_crypto_algo["name"], skey, iv, op_enc)
+
+    def encrypt_aes256(s, key):
+        c = _init_aes256_cipher(key, 1)
+        ret = c.update(s)
+        ret += c.final()
+        del c
+        return binascii.b2a_base64(ret)
+
+    def decrypt_aes256(s, key):
+        c = _init_aes256_cipher(key, 0)
+        ret = c.update(binascii.a2b_base64(s))
+        ret += c.final()
+        del c
+        return ret
 else:
     def _new_cipher(key):
         skey = key[0:crypto_algo["key_size"]]   # Use first n bytes as crypto key
@@ -71,8 +89,27 @@ else:
         padded = dec.update(encrypted) + dec.finalize()
         return unpad.update(padded) + unpad.finalize()
 
+    def _new_aes256_cipher(key):
+        skey = key[0:aes256_crypto_algo["key_size"]]   # Use first n bytes as crypto key
+        assert len(skey) == aes256_crypto_algo["key_size"], len(skey)
+        iv = key[-aes256_crypto_algo["iv_size"]:]      # Use last m bytes as IV
+        return Cipher(algorithms.AES(skey), modes.CFB(iv), backend=default_backend())
 
-def _get_canonical_string (params=None):
+    def encrypt_aes256(s, key):
+        enc = _new_aes256_cipher(key).encryptor()
+        pad = _new_padding().padder()
+        padded = pad.update(s) + pad.finalize()
+        encrypted = enc.update(padded) + enc.finalize()
+        return binascii.b2a_base64(encrypted)
+
+    def decrypt_aes256(s, key):
+        dec = _new_aes256_cipher(key).decryptor()
+        unpad = _new_padding().unpadder()
+        encrypted = binascii.a2b_base64(s)
+        padded = dec.update(encrypted) + dec.finalize()
+        return unpad.update(padded) + unpad.finalize()
+
+def _get_canonical_string(params=None):
     params = params or {}
     s = ""
     for key, value in sorted(params.items()):
@@ -91,5 +128,14 @@ def sign_http_request(data, key, timestamp=None):
     return sign, date
 
 def pwgen(size):
-    return re.sub('[^\w]', '', keygen(size*2))[:size]
+    return re.sub('[^\w]', '', keygen(size * 2))[:size]
 
+def calculate_md5_sum(path):
+    md5_sum = hashlib.md5()
+    with open(path, 'rb') as f:
+        while True:
+            data = f.read(4096)
+            if not data:
+                break
+            md5_sum.update(data)
+    return md5_sum.hexdigest()
